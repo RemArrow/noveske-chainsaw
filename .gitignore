@@ -1,0 +1,14 @@
+# build output
+build/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Generated from the purchased 3DMA model (redistribution not verified) - never commit
+Assets/
+*.png
+*.fbx
+*.blend
+*.mtl
