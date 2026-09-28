@@ -1,0 +1,23 @@
+Noveske Chainsaw for Geronimo - credits
+=======================================
+
+3D model and textures
+  NOVESKE IRREGULAR DEFENSE CHAINSAW RIFLE
+  by 3DMA - 3D Military Assets
+  www.3dmilitaryassets.com
+  https://www.3dmilitaryassets.com/products/noveske-irregular-defense-chainsaw-rifle
+  3DMA community Discord: https://discord.gg/UBCwpR9
+
+  The model and its textures are 3DMA's work, used under license. They ship only inside
+  NoveskeChainsaw.dll, encrypted, and may not be extracted or redistributed. If you like the
+  gun, support 3DMA by buying from their store.
+
+Plugin
+  RemArrow - https://github.com/RemArrow
+  Runs on GML, the Geronimo Mod Loader: https://github.com/RemArrow/geronimo-mod-loader
+
+Real-world rifle
+  The Chainsaw rifle is a Noveske Rifleworks x Irregular Defense collaboration.
+
+This mod is not affiliated with or endorsed by 3DMA, Noveske Rifleworks, Irregular Defense or
+Dark Matter Studios (the developer of Geronimo). All trademarks belong to their owners.

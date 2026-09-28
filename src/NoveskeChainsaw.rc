@@ -1,25 +1,39 @@
-// Builds the Noveske's runtime assets into NoveskeChainsaw.dll, so the plugin ships as one file.
-// build.bat compiles this with the repo root as include path; Assets\ is generated from the
-// purchased source art by tools\prepare_runtime.py and is not in the repo.
-// Names are what the plugin passes to gml::Resource (case-insensitive).
+// NoveskeChainsaw.dll resources: the encrypted assets and the version/credits block.
+#include "version.h"
 
-NOVESKE_OBJ       RCDATA "Assets\\noveske.obj"
+// The Noveske's runtime assets as one encrypted payload. build.bat first runs tools\pack over
+// Assets\ (generated from the purchased source art by tools\prepare_runtime.py, not in the repo):
+// every asset is AES-256-GCM encrypted with a per-build key, so the DLL holds no extractable PNG
+// or OBJ (src\payload.h).
+DATA RCDATA "build\\gen\\payload.bin"
 
-Body_Diffuse      RCDATA "Assets\\Body_Diffuse.png"
-Body_Normal       RCDATA "Assets\\Body_Normal.png"
-Body_ORM          RCDATA "Assets\\Body_ORM.png"
-Handguard_Diffuse RCDATA "Assets\\Handguard_Diffuse.png"
-Handguard_Normal  RCDATA "Assets\\Handguard_Normal.png"
-Handguard_ORM     RCDATA "Assets\\Handguard_ORM.png"
-Stock_Diffuse     RCDATA "Assets\\Stock_Diffuse.png"
-Stock_Normal      RCDATA "Assets\\Stock_Normal.png"
-Stock_ORM         RCDATA "Assets\\Stock_ORM.png"
-Grip_Diffuse      RCDATA "Assets\\Grip_Diffuse.png"
-Grip_Normal       RCDATA "Assets\\Grip_Normal.png"
-Grip_ORM          RCDATA "Assets\\Grip_ORM.png"
-Muzzle_Diffuse    RCDATA "Assets\\Muzzle_Diffuse.png"
-Muzzle_Normal     RCDATA "Assets\\Muzzle_Normal.png"
-Muzzle_ORM        RCDATA "Assets\\Muzzle_ORM.png"
-Feer_Diffuse      RCDATA "Assets\\Feer_Diffuse.png"
-Feer_Normal       RCDATA "Assets\\Feer_Normal.png"
-Feer_ORM          RCDATA "Assets\\Feer_ORM.png"
+// Shown in the DLL's Properties > Details in Windows.
+1 VERSIONINFO
+FILEVERSION NOVESKE_VERSION_NUM
+PRODUCTVERSION NOVESKE_VERSION_NUM
+FILEFLAGSMASK 0x3F
+FILEFLAGS 0x0
+FILEOS 0x40004
+FILETYPE 0x2
+FILESUBTYPE 0x0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "RemArrow"
+            VALUE "FileDescription", "Noveske Chainsaw - GML plugin for Geronimo"
+            VALUE "FileVersion", NOVESKE_VERSION
+            VALUE "InternalName", "NoveskeChainsaw"
+            VALUE "OriginalFilename", "NoveskeChainsaw.dll"
+            VALUE "ProductName", "Noveske Chainsaw"
+            VALUE "ProductVersion", NOVESKE_VERSION
+            VALUE "LegalCopyright", NOVESKE_MODEL_CREDIT ". Plugin code by RemArrow."
+            VALUE "Comments", "Model: 3DMA - 3D Military Assets, www.3dmilitaryassets.com. Not affiliated with or endorsed by 3DMA, Noveske Rifleworks, Irregular Defense or Dark Matter Studios."
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

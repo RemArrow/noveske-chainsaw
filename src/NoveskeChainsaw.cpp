@@ -21,10 +21,14 @@
 //
 // Settings: GML\config\com.remarrow.noveskechainsaw.cfg. Build: build.bat [install].
 // Assets: tools\prepare_runtime.py writes Assets\ from the purchased source art (not in the repo);
-// src\NoveskeChainsaw.rc builds them into the DLL, which is all that gets installed.
+// tools\pack encrypts them into the payload that src\NoveskeChainsaw.rc builds into the DLL, which
+// is all that gets installed. Nothing in the DLL is an extractable PNG or OBJ (src\payload.h).
 #include <GML/GML.hpp>
 #include <windows.h>
 #include <map>
+#include "payload.h"
+#include "payload_key.h"  // generated per build by tools\pack (build\gen), never committed
+#include "version.h"
 #pragma comment(lib, "user32.lib")  // F8 keybind
 
 using namespace gml;
@@ -114,6 +118,18 @@ struct Pending { GUObject* actor; ULONGLONG since; };
 static std::vector<Pending> s_pending;
 static std::vector<GUObject*> s_dressed;  // receivers already given the Noveske look
 
+// Decrypts one asset from the payload into `out`. Callers wipe it as soon as the engine has it, so
+// at most one asset exists in plain form, and only for that moment.
+static bool Unpack(const char* name, std::vector<uint8_t>& out) {
+    static Blob blob = Resource("DATA");
+    uint8_t key[32];
+    for (int i = 0; i < 32; i++) key[i] = kPayloadKeyA[i] ^ kPayloadKeyB[i];
+    bool ok = blob && payload::Extract(blob.data, blob.size, key, name, out);
+    SecureZeroMemory(key, sizeof key);
+    if (!ok) Error("embedded asset '{}' is missing or damaged", name);
+    return ok;
+}
+
 static bool BuildVisualAssets() {
     if (s_assetsTried) return s_mesh != nullptr;
     s_assetsTried = true;
@@ -124,7 +140,8 @@ static bool BuildVisualAssets() {
     Object shader = LoadObject(kShader);
     if (!shader) { Error("weapon shader {} not found", kShader); return false; }
 
-    // Mesh and textures are resources inside this DLL (src/NoveskeChainsaw.rc).
+    // Mesh and textures come from the encrypted payload inside this DLL, one at a time.
+    std::vector<uint8_t> buf;
     std::string names[kNumParts];
     const char* namePtrs[kNumParts];
     for (int i = 0; i < kNumParts; i++) {
@@ -132,8 +149,8 @@ static bool BuildVisualAssets() {
         if (!s_mids[i]) { Error("could not create a material instance for {}", kParts[i]); return false; }
         for (const char* param : {"Diffuse", "Normal", "ORM"}) {
             std::string res = std::string(kParts[i]) + "_" + param;
-            Blob png = Resource(res.c_str());
-            GUObject* tex = png ? API->ImportTextureFromMemory(png.data, png.size, res.c_str()) : nullptr;
+            GUObject* tex = Unpack(res.c_str(), buf) ? API->ImportTextureFromMemory(buf.data(), buf.size(), res.c_str()) : nullptr;
+            payload::Wipe(buf);
             if (!tex || !API->SetMaterialTexture(s_mids[i], param, tex))
                 Warn("{}: texture {} missing - that channel keeps the shader default", kParts[i], param);
         }
@@ -149,9 +166,9 @@ static bool BuildVisualAssets() {
     o.materialCount = kNumParts;
     o.materialNames = namePtrs;
     o.materials = s_mids;
-    Blob obj = Resource("NOVESKE_OBJ");
-    s_mesh = obj ? API->ImportDynamicMeshFromMemory(obj.data, obj.size, "noveske.obj", &o) : nullptr;
-    if (!s_mesh) Error("could not build the Noveske mesh from the embedded noveske.obj");
+    s_mesh = Unpack("noveske", buf) ? API->ImportDynamicMeshFromMemory(buf.data(), buf.size(), "noveske", &o) : nullptr;
+    payload::Wipe(buf);
+    if (!s_mesh) Error("could not build the Noveske mesh");
     else Log("Noveske visuals ready: {}", Object(s_mesh).FullName());
     return s_mesh != nullptr;
 }
@@ -356,9 +373,10 @@ static bool GameHasFocus() {
     return pid == GetCurrentProcessId();
 }
 
-GML_PLUGIN("com.remarrow.noveskechainsaw", "Noveske Chainsaw", "1.4.0");
+GML_PLUGIN("com.remarrow.noveskechainsaw", "Noveske Chainsaw", NOVESKE_VERSION);
 
 GML_AWAKE() {
+    Message(NOVESKE_MODEL_CREDIT);
     s_probe = Config.Bind("Debug", "Probe", false,
         "Run the package-loading probe at the first level start and on every F8.\n"
         "It shows that newly added packages never register.").Value();

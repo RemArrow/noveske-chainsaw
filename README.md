@@ -5,6 +5,22 @@ to Geronimo's gun spawner. Guns spawned from its entry get the Noveske's own mes
 textures. **Nothing in the game is replaced**: the stock HK416 entry, and every other HK416, stays
 an HK416.
 
+## Credits
+
+- **3D model and textures:** [NOVESKE IRREGULAR DEFENSE CHAINSAW RIFLE](https://www.3dmilitaryassets.com/products/noveske-irregular-defense-chainsaw-rifle)
+  by **3DMA — 3D Military Assets** ([www.3dmilitaryassets.com](https://www.3dmilitaryassets.com)),
+  used under license. It's 3DMA's work: the model ships only inside the DLL, encrypted, and must
+  not be extracted or redistributed. If you like the gun, support 3DMA by buying from
+  [their store](https://www.3dmilitaryassets.com) or joining their
+  [Discord](https://discord.gg/UBCwpR9).
+- **Plugin:** RemArrow, running on [GML](https://github.com/RemArrow/geronimo-mod-loader).
+- **Real-world rifle:** the Chainsaw is a Noveske Rifleworks × Irregular Defense collaboration.
+
+The same credits ship next to the DLL as `CREDITS.txt`, sit in the DLL's file properties
+(Properties → Details), and are logged at every launch. This mod is not affiliated with or
+endorsed by 3DMA, Noveske Rifleworks, Irregular Defense or Dark Matter Studios (Geronimo's
+developer); all trademarks belong to their owners.
+
 ## How it works
 
 1. **Spawner entry.** After `BP_GameInstance::GetItems` builds the gun lists, the plugin constructs
@@ -16,9 +32,9 @@ an HK416.
    passes the item widget, and its `WeaponItem` is the gun.
 3. **Visuals.** Only that actor gets a `DynamicMeshComponent` with the Noveske mesh. The mesh uses
    six instances of the game's weapon shader `M_DefaultShader`, one per part, fed `Diffuse` /
-   `Normal` / `ORM` textures. The mesh and all 18 textures are **built into `NoveskeChainsaw.dll`**
-   (`src/NoveskeChainsaw.rc`) and loaded from memory with GML 2.2's `ImportDynamicMeshFromMemory`
-   / `ImportTextureFromMemory`, so the plugin is a single file.
+   `Normal` / `ORM` textures. The mesh and all 18 textures are **built into `NoveskeChainsaw.dll`
+   encrypted** (see [Asset protection](#asset-protection)) and loaded from memory with GML 2.2's
+   `ImportDynamicMeshFromMemory` / `ImportTextureFromMemory`, so the plugin is a single file.
    The HK416's own mesh is hidden; its collision, physics, trigger, bolt, magazine and attachment
    rails stay in place.
 4. **Alignment.** The mesh is offset so the Noveske's lower receiver sits on the HK416's: its
@@ -36,9 +52,38 @@ an HK416.
 
 - Geronimo (Steam, UE 5.7.4) with **GML 2.2.0 or newer**
   ([releases](https://github.com/RemArrow/geronimo-mod-loader/releases)).
-- The **Noveske Chainsaw** 3D model from 3DMA (purchased). Its geometry and textures are **not**
-  in this repo; `Assets\` is generated locally from your copy and compiled into the DLL. That
-  makes the built DLL a copy of the art too: don't publish it unless the license allows that.
+- To build it: a licensed copy of 3DMA's
+  [NOVESKE IRREGULAR DEFENSE CHAINSAW RIFLE](https://www.3dmilitaryassets.com/products/noveske-irregular-defense-chainsaw-rifle).
+  Its geometry and textures are **not** in this repo: `Assets\` is generated locally from your copy
+  and compiled into the DLL, encrypted. What you may do with a build depends on your 3DMA license
+  tier ([licenses](https://www.3dmilitaryassets.com/pages/licences)). For example, the Extended
+  license requires the credit above in the product description.
+
+## Asset protection
+
+The 3DMA art must not be rippable from the plugin. 3DMA's license requires "reasonable measures"
+to ensure its assets "cannot be easily ripped, extracted, or reverse-engineered". `build.bat`
+runs `tools/pack` over `Assets\` on every build:
+
+- Every asset is **AES-256-GCM encrypted** (the OBJ is LZMS-compressed first) with a **random key
+  per build**. They are stored as one resource with no names, only salted hashes
+  (`src/payload.h`). The DLL contains no PNG or OBJ signatures and no plain asset bytes, so
+  resource editors, 7-Zip, binwalk-style carvers and pak tools (UModel/FModel) find nothing.
+- The key is compiled in as two XOR halves (`build/gen/payload_key.h`, never committed). The whole
+  key exists only for the moment an asset is decrypted.
+- The plugin decrypts **one asset at a time**, hands it to the engine and wipes it, so at most
+  one asset is ever in plain form, only briefly.
+- GCM authenticates every asset: a modified DLL is refused ("embedded asset … is missing or
+  damaged"), not decoded.
+- `pack` proves each build before writing it. Every asset must decrypt byte-identical, a payload
+  with one flipped byte must be refused, and no PNG/OBJ markers may appear. Symbols (`.pdb`) are
+  not installed or released.
+
+What no game can prevent, this one included: once the gun is rendered, GPU capture tools
+(RenderDoc, NinjaRipper) can copy the mesh and textures the graphics card is drawing. A skilled
+reverse engineer with a debugger can also find the key, because the game has to be able to
+decrypt the art to show it. This protection is aimed at file ripping, which is how assets are
+normally stolen from mods.
 - Visual Studio 2022 and Blender (for the asset step).
 
 ## Build and install
@@ -51,7 +96,7 @@ blender --background --python tools\prepare_runtime.py
 build.bat install
 ```
 
-`install` copies the single `NoveskeChainsaw.dll` (about 52 MB with the art inside) to
+`install` copies the single `NoveskeChainsaw.dll` (about 50 MB with the encrypted art inside) and `CREDITS.txt` to
 `...\Geronimo\Binaries\Win64\GML\plugins\NoveskeChainsaw\`. It removes a loose `Assets\` folder
 left there by versions before 1.4, and refuses to run while the game is running. Set
 `GML_GAME_DIR` if the game isn't in the default Steam library, and `GML_SDK` to build against a
@@ -70,7 +115,8 @@ GML checkout other than `external/gml`.
 
 | | |
 |---|---|
-| `tools/prepare_runtime.py` | source FBX + 4K PBR textures → `Assets\` (the build input that gets embedded): OBJ with 6 material groups; per part Diffuse, Normal and ORM PNGs at 2K/1K, with linear data pre-encoded for the game's sRGB import |
+| `tools/prepare_runtime.py` | source FBX + 4K PBR textures → `Assets\` (the build input that gets encrypted and embedded): OBJ with 6 material groups; per part Diffuse, Normal and ORM PNGs at 2K/1K, with linear data pre-encoded for the game's sRGB import |
+| `tools/pack` (`build\pack.exe`) | `Assets\` → `build\gen\payload.bin` + `payload_key.h`: the encrypted payload and this build's key (see [Asset protection](#asset-protection)); run by `build.bat` |
 | `tools/align` (`build\align.exe`) | `align <HK_416_279_v2.uexp> Assets\noveske.obj [x y z]`: computes the offset from the cooked HK416 mesh (extract it with retoc `to-legacy -f HK_416_279`), then prints the plugin's `kAttachPoints` table for that offset (or for `x y z`) |
 | `tests/NoveskeDev` | in-game test harness, never installed by `build.bat`. It loads the team room and presses the spawner's Noveske item through the game's own button handler. It then logs the receiver's attach points (`ATTACH`), mounts a foregrip, optic and suppressor through `AttachToServer` (`MOUNT`), and poses the gun in front of the headset camera for screenshots. It does the same for a stock HK416 to compare |
 
