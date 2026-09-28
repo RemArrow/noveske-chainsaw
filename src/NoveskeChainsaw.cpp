@@ -11,16 +11,17 @@
 // 2. Visuals: the gun station spawns the entry's ReceiverClass (the HK416 blueprint, which
 //    provides handling, grip points and attachment sockets). When a receiver begins play and
 //    the station holding it as CurrentReceiver last had the Noveske entry picked in its spawner
-//    widget, that one actor gets a Noveske DynamicMeshComponent (built at runtime from
-//    Assets\noveske.obj via GML's ImportDynamicMesh, textured with M_DefaultShader instances fed
-//    Assets\<Part>_{Diffuse,Normal,ORM}.png) and its HK416 mesh is hidden. Collision, physics,
-//    grips and sockets stay the HK416's.
+//    widget, that one actor gets a Noveske DynamicMeshComponent (built at runtime from the
+//    noveske.obj embedded in this DLL, textured with M_DefaultShader instances fed the embedded
+//    <Part>_{Diffuse,Normal,ORM}.png) and its HK416 mesh is hidden. Collision, physics, grips and
+//    sockets stay the HK416's; its attachment rails are moved onto the Noveske's.
 //
 // 3. Probe (config [Debug] Probe = true): package-loading diagnostic - game packages vs the
 //    never-registering new Noveske packages.
 //
 // Settings: GML\config\com.remarrow.noveskechainsaw.cfg. Build: build.bat [install].
-// Assets: tools\prepare_runtime.py writes Assets\ from the purchased source art (not in the repo).
+// Assets: tools\prepare_runtime.py writes Assets\ from the purchased source art (not in the repo);
+// src\NoveskeChainsaw.rc builds them into the DLL, which is all that gets installed.
 #include <GML/GML.hpp>
 #include <windows.h>
 #include <map>
@@ -116,22 +117,23 @@ static std::vector<GUObject*> s_dressed;  // receivers already given the Noveske
 static bool BuildVisualAssets() {
     if (s_assetsTried) return s_mesh != nullptr;
     s_assetsTried = true;
-    if (API->size < offsetof(GML_API, AddDynamicMeshComponent) + sizeof(void*)) {
-        Error("this plugin needs GML 2.1 or newer (ImportDynamicMesh)");
+    if (API->size < offsetof(GML_API, ImportDynamicMeshFromMemory) + sizeof(void*)) {
+        Error("this plugin needs GML 2.2 or newer (assets embedded in the DLL)");
         return false;
     }
     Object shader = LoadObject(kShader);
     if (!shader) { Error("weapon shader {} not found", kShader); return false; }
 
+    // Mesh and textures are resources inside this DLL (src/NoveskeChainsaw.rc).
     std::string names[kNumParts];
     const char* namePtrs[kNumParts];
     for (int i = 0; i < kNumParts; i++) {
-        std::wstring part(kParts[i], kParts[i] + strlen(kParts[i]));
         s_mids[i] = API->CreateMaterialInstance(shader.ptr);
         if (!s_mids[i]) { Error("could not create a material instance for {}", kParts[i]); return false; }
-        for (auto [param, suffix] : {std::pair{"Diffuse", L"_Diffuse.png"}, std::pair{"Normal", L"_Normal.png"},
-                                     std::pair{"ORM", L"_ORM.png"}}) {
-            GUObject* tex = API->ImportTexture(PluginPath(L"Assets\\" + part + suffix).c_str());
+        for (const char* param : {"Diffuse", "Normal", "ORM"}) {
+            std::string res = std::string(kParts[i]) + "_" + param;
+            Blob png = Resource(res.c_str());
+            GUObject* tex = png ? API->ImportTextureFromMemory(png.data, png.size, res.c_str()) : nullptr;
             if (!tex || !API->SetMaterialTexture(s_mids[i], param, tex))
                 Warn("{}: texture {} missing - that channel keeps the shader default", kParts[i], param);
         }
@@ -147,10 +149,63 @@ static bool BuildVisualAssets() {
     o.materialCount = kNumParts;
     o.materialNames = namePtrs;
     o.materials = s_mids;
-    s_mesh = API->ImportDynamicMesh(PluginPath(L"Assets\\noveske.obj").c_str(), &o);
-    if (!s_mesh) Error("could not build the Noveske mesh from Assets\\noveske.obj");
+    Blob obj = Resource("NOVESKE_OBJ");
+    s_mesh = obj ? API->ImportDynamicMeshFromMemory(obj.data, obj.size, "noveske.obj", &o) : nullptr;
+    if (!s_mesh) Error("could not build the Noveske mesh from the embedded noveske.obj");
     else Log("Noveske visuals ready: {}", Object(s_mesh).FullName());
     return s_mesh != nullptr;
+}
+
+// Where attachments go. The HK416 receiver's attachment splines (Picatinny rails, M-LOK faces) and
+// its muzzle attach point sit on the HK416's surfaces: the optic would float 4 mm over the Noveske's
+// top rail and a foregrip hang 5.5 mm under its handguard. These are the same components moved onto
+// the Noveske (start point, actor space, cm, for the default offset; tools/align prints this table).
+struct AttachPoint { const char* name; double x, y, z; };
+static const AttachPoint kAttachPoints[] = {
+    {"ReceiverAttachmentSpline", -4.825, -0.026, 6.098},      // HK (0.000, 6.510)
+    {"ReceiverAttachmentSplineHG12", 10.709, -0.026, 6.098},  // HK (0.000, 6.510)
+    {"ReceiverAttachmentSplineHG45", 15.523, 1.427, 4.474},   // HK (1.592, 4.156)
+    {"ReceiverAttachmentSplineHG9", 15.523, 2.028, 3.022},    // HK (2.100, 2.926)
+    {"ReceiverAttachmentSplineHG135", 15.523, 1.427, 1.569},  // HK (1.592, 1.675)
+    {"ReceiverAttachmentSplineHG6", 15.523, -0.026, 0.967},   // HK (0.000, 0.414)
+    {"ReceiverAttachmentSplineHG-135", 15.523, -1.478, 1.569},  // HK (-1.592, 1.675)
+    {"ReceiverAttachmentSplineHG-90", 15.523, -2.080, 3.022},   // HK (-2.100, 2.926)
+    {"ReceiverAttachmentSplineHG-45", 15.523, -1.479, 4.474},   // HK (-1.592, 4.156)
+    {"Fire Location", 37.013, -0.026, 3.022},  // muzzle attach + shot origin; HK (35.899, 0.000, 2.929)
+};
+static const float kDefaultOffset[3] = {2.154f, -0.466f, -0.909f};
+static bool s_fitAttachments = true;
+
+struct Vec3 { double x, y, z; };
+
+static void FitAttachPoints(Object actor) {
+    Params gt(actor, "GetTransform");
+    gt.Call();
+    GML_PropInfo xf;
+    API->GetPropertyInfo(API->FindProperty((GUStruct*)API->FindFunction(actor.Struct(), "GetTransform"), "ReturnValue"), &xf);
+    Params gc(actor, "K2_GetComponentsByClass");
+    gc.Set("ComponentClass", FindClass("SceneComponent")).Call();
+    auto* arr = (GML_TArray*)gc.Ptr("ReturnValue");
+    int moved = 0;
+    for (int i = 0; arr && i < arr->Num; i++) {
+        Object c(((GUObject**)arr->Data)[i]);
+        std::string name = c.Name();
+        for (auto& p : kAttachPoints) {
+            if (name != p.name) continue;
+            // A non-default mesh offset moves the Noveske's rails with it.
+            Vec3 local{p.x + s_offset[0] - kDefaultOffset[0], p.y + s_offset[1] - kDefaultOffset[1],
+                       p.z + s_offset[2] - kDefaultOffset[2]};
+            Params tl(Lib("KismetMathLibrary"), "TransformLocation");
+            std::memcpy(tl.Ptr("T"), gt.Ptr("ReturnValue"), xf.size);
+            tl.Set("Location", local).Call();
+            Params sw(c, "K2_SetWorldLocation");
+            sw.Set("NewLocation", tl.Return<Vec3>()).Set("bSweep", false).Set("bTeleport", true).Call();
+            moved++;
+        }
+    }
+    if (moved != (int)std::size(kAttachPoints))
+        Warn("{}: moved {} of {} attach points - receiver layout differs from the HK416's", actor.Name(), moved,
+             std::size(kAttachPoints));
 }
 
 static void DressAsNoveske(Object actor) {
@@ -161,8 +216,10 @@ static void DressAsNoveske(Object actor) {
     if (!comp) { Error("could not add the Noveske mesh to {}", actor.FullName()); return; }
     Params hide(root, "SetVisibility");
     hide.Set("bNewVisibility", false).Set("bPropagateToChildren", false).Call();  // children stay visible
+    if (s_fitAttachments) FitAttachPoints(actor);
     s_dressed.push_back(actor.ptr);
-    Log("*** {} spawned from the Noveske entry: dressed as Noveske Chainsaw ***", actor.Name());
+    Log("*** {} spawned from the Noveske entry: dressed as Noveske Chainsaw{} ***", actor.Name(),
+        s_fitAttachments ? ", attach points on its rails" : "");
 }
 
 // The spawner's menu items are WB_CustomizationItemGun widgets; the gun they stand for is their
@@ -299,7 +356,7 @@ static bool GameHasFocus() {
     return pid == GetCurrentProcessId();
 }
 
-GML_PLUGIN("com.remarrow.noveskechainsaw", "Noveske Chainsaw", "1.2.1");
+GML_PLUGIN("com.remarrow.noveskechainsaw", "Noveske Chainsaw", "1.4.0");
 
 GML_AWAKE() {
     s_probe = Config.Bind("Debug", "Probe", false,
@@ -323,13 +380,16 @@ GML_AWAKE() {
         down = now;
     });
     s_visualsEnabled = Config.Bind("Visuals", "Enabled", true,
-        "Give guns spawned from the Noveske entry the Noveske mesh and textures (Assets folder).\n"
+        "Give guns spawned from the Noveske entry the Noveske mesh and textures (built into the DLL).\n"
         "Only those actors change; no game asset is replaced.").Value();
     // Defaults computed by tools/align: trimmed ICP of the Noveske's lower receiver onto the HK416's
     // (the HK416's trigger, selector, bolt catch and magazine stay on the gun), 0.21 cm rms.
     s_offset[0] = Config.Bind("Visuals", "OffsetX", 2.154f, "cm, + = toward the muzzle").Value();
     s_offset[1] = Config.Bind("Visuals", "OffsetY", -0.466f, "cm, + = to the gun's right").Value();
     s_offset[2] = Config.Bind("Visuals", "OffsetZ", -0.909f, "cm, + = up").Value();
+    s_fitAttachments = Config.Bind("Visuals", "FitAttachments", true,
+        "Move the rails, M-LOK slots and muzzle point that attachments snap to onto the Noveske's own\n"
+        "(false = where they are on the HK416).").Value();
     if (s_visualsEnabled) InstallVisuals();
     Log("loaded - adds '{}' to the Assault Rifle spawner; visuals {}", kDisplayName, s_visualsEnabled ? "on" : "off");
     return 0;

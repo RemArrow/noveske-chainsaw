@@ -1,0 +1,25 @@
+// Builds the Noveske's runtime assets into NoveskeChainsaw.dll, so the plugin ships as one file.
+// build.bat compiles this with the repo root as include path; Assets\ is generated from the
+// purchased source art by tools\prepare_runtime.py and is not in the repo.
+// Names are what the plugin passes to gml::Resource (case-insensitive).
+
+NOVESKE_OBJ       RCDATA "Assets\\noveske.obj"
+
+Body_Diffuse      RCDATA "Assets\\Body_Diffuse.png"
+Body_Normal       RCDATA "Assets\\Body_Normal.png"
+Body_ORM          RCDATA "Assets\\Body_ORM.png"
+Handguard_Diffuse RCDATA "Assets\\Handguard_Diffuse.png"
+Handguard_Normal  RCDATA "Assets\\Handguard_Normal.png"
+Handguard_ORM     RCDATA "Assets\\Handguard_ORM.png"
+Stock_Diffuse     RCDATA "Assets\\Stock_Diffuse.png"
+Stock_Normal      RCDATA "Assets\\Stock_Normal.png"
+Stock_ORM         RCDATA "Assets\\Stock_ORM.png"
+Grip_Diffuse      RCDATA "Assets\\Grip_Diffuse.png"
+Grip_Normal       RCDATA "Assets\\Grip_Normal.png"
+Grip_ORM          RCDATA "Assets\\Grip_ORM.png"
+Muzzle_Diffuse    RCDATA "Assets\\Muzzle_Diffuse.png"
+Muzzle_Normal     RCDATA "Assets\\Muzzle_Normal.png"
+Muzzle_ORM        RCDATA "Assets\\Muzzle_ORM.png"
+Feer_Diffuse      RCDATA "Assets\\Feer_Diffuse.png"
+Feer_Normal       RCDATA "Assets\\Feer_Normal.png"
+Feer_ORM          RCDATA "Assets\\Feer_ORM.png"

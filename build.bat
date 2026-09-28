@@ -1,9 +1,11 @@
 @echo off
 rem Builds the Noveske Chainsaw GML plugin, plus the alignment tool and the in-game test harness.
 rem   build.bat            build into build\
-rem   build.bat install    also copy the plugin and Assets\ into the game (refuses while the game runs)
+rem   build.bat install    also copy the plugin into the game (refuses while the game runs)
 rem
-rem Needs the GML SDK (github.com/RemArrow/geronimo-mod-loader): the external\gml submodule,
+rem The mesh and textures are built into NoveskeChainsaw.dll (src\NoveskeChainsaw.rc), so Assets\
+rem must exist first: generate it from the purchased source art with tools\prepare_runtime.py.
+rem Needs the GML SDK 2.2+ (github.com/RemArrow/geronimo-mod-loader): the external\gml submodule,
 rem or set GML_SDK to its include folder. Set GML_GAME_DIR to your ...\Geronimo\Binaries\Win64 if
 rem the game is not in the default Steam library.
 setlocal
@@ -19,6 +21,14 @@ if not exist "%SDK%\GML\GML.hpp" (
   echo Run: git submodule update --init   or set GML_SDK
   exit /b 1
 )
+findstr /c:"ImportDynamicMeshFromMemory" "%SDK%\GML\GML.h" >nul || (
+  echo The GML SDK at %SDK% is older than 2.2 - update the submodule or set GML_SDK
+  exit /b 1
+)
+if not exist "%ROOT%Assets\noveske.obj" (
+  echo Assets\ is missing - generate it with tools\prepare_runtime.py first ^(it is built into the DLL^).
+  exit /b 1
+)
 if not defined VCToolsInstallDir (
   call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 )
@@ -26,8 +36,9 @@ for %%D in ("%OUT%\obj" "%OUT%\NoveskeChainsaw" "%OUT%\tests\NoveskeDev") do if 
 set CFLAGS=/nologo /std:c++20 /O2 /MT /EHsc /W3 /Zi /DUNICODE /D_UNICODE /I"%SDK%"
 set LFLAGS=/DEBUG /INCREMENTAL:NO
 
-echo === plugin
-cl %CFLAGS% /LD /Fo"%OUT%\obj\\" /Fd"%OUT%\obj\\" "%ROOT%src\*.cpp" /Fe"%OUT%\NoveskeChainsaw\NoveskeChainsaw.dll" /link %LFLAGS% || exit /b 1
+echo === plugin (mesh + textures embedded)
+rc /nologo /I "%ROOT%." /fo"%OUT%\obj\NoveskeChainsaw.res" "%ROOT%src\NoveskeChainsaw.rc" || exit /b 1
+cl %CFLAGS% /LD /Fo"%OUT%\obj\\" /Fd"%OUT%\obj\\" "%ROOT%src\*.cpp" "%OUT%\obj\NoveskeChainsaw.res" /Fe"%OUT%\NoveskeChainsaw\NoveskeChainsaw.dll" /link %LFLAGS% || exit /b 1
 echo === align tool
 cl /nologo /std:c++20 /O2 /EHsc /Fo"%OUT%\obj\\" "%ROOT%tools\align\align.cpp" /Fe"%OUT%\align.exe" || exit /b 1
 echo === test harness (never installed)
@@ -39,16 +50,12 @@ if /i "%1"=="install" (
     echo Geronimo is running - close it first.
     exit /b 1
   )
-  if not exist "%ROOT%Assets\noveske.obj" (
-    echo Assets\ is missing - generate it with tools\prepare_runtime.py first.
-    exit /b 1
-  )
   echo === install to "%GAME%\GML\plugins\NoveskeChainsaw"
   if not exist "%GAME%\GML\plugins\NoveskeChainsaw" mkdir "%GAME%\GML\plugins\NoveskeChainsaw"
   copy /y "%OUT%\NoveskeChainsaw\NoveskeChainsaw.dll" "%GAME%\GML\plugins\NoveskeChainsaw\" >nul || exit /b 1
   copy /y "%OUT%\NoveskeChainsaw\NoveskeChainsaw.pdb" "%GAME%\GML\plugins\NoveskeChainsaw\" >nul
-  robocopy "%ROOT%Assets" "%GAME%\GML\plugins\NoveskeChainsaw\Assets" /MIR /NJH /NJS /NFL /NDL /NP >nul
-  if errorlevel 8 exit /b 1
+  rem loose assets from plugin versions before 1.4 are no longer read
+  if exist "%GAME%\GML\plugins\NoveskeChainsaw\Assets" rmdir /s /q "%GAME%\GML\plugins\NoveskeChainsaw\Assets"
 )
 echo === done
 exit /b 0
