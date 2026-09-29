@@ -2,8 +2,8 @@
 // Windows version resource (NoveskeChainsaw.rc).
 #pragma once
 
-#define NOVESKE_VERSION_NUM 1, 5, 0, 0
-#define NOVESKE_VERSION "1.5.0"
+#define NOVESKE_VERSION_NUM 1, 6, 0, 0
+#define NOVESKE_VERSION "1.6.0"
 
 // 3DMA's license: "Proper credit to 3DMA (www.3dmilitaryassets.com) must be given".
 #define NOVESKE_MODEL_CREDIT                                                                       \

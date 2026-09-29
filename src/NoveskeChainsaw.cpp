@@ -15,6 +15,8 @@
 //    noveske.obj embedded in this DLL, textured with M_DefaultShader instances fed the embedded
 //    <Part>_{Diffuse,Normal,ORM}.png) and its HK416 mesh is hidden. Collision, physics, grips and
 //    sockets stay the HK416's; its attachment rails are moved onto the Noveske's.
+//    Guns the game rebuilds from your saved loadout (team room start, every operation) are
+//    recognised through their save slot and dressed the same way (see "loadouts" below).
 //
 // 3. Probe (config [Debug] Probe = true): package-loading diagnostic - game packages vs the
 //    never-registering new Noveske packages.
@@ -25,6 +27,8 @@
 // is all that gets installed. Nothing in the DLL is an extractable PNG or OBJ (src\payload.h).
 #include <GML/GML.hpp>
 #include <windows.h>
+#include <algorithm>
+#include <cmath>
 #include <map>
 #include "payload.h"
 #include "payload_key.h"  // generated per build by tools\pack (build\gen), never committed
@@ -195,37 +199,104 @@ static bool s_fitAttachments = true;
 
 struct Vec3 { double x, y, z; };
 
+// Actor-space attach point for table entry `p`: a non-default mesh offset moves the rails with it.
+static Vec3 AttachTarget(const AttachPoint& p) {
+    return {p.x + s_offset[0] - kDefaultOffset[0], p.y + s_offset[1] - kDefaultOffset[1], p.z + s_offset[2] - kDefaultOffset[2]};
+}
+
+// Actor transform <-> world, via KismetMathLibrary on the actor's FTransform.
+struct ActorFrame {
+    Params gt;
+    size_t size;
+    explicit ActorFrame(Object actor) : gt(actor, "GetTransform") {
+        gt.Call();
+        GML_PropInfo xf;
+        API->GetPropertyInfo(API->FindProperty((GUStruct*)API->FindFunction(actor.Struct(), "GetTransform"), "ReturnValue"), &xf);
+        size = xf.size;
+    }
+    Vec3 Call(const char* fn, const char* arg, Vec3 v) {
+        Params p(Lib("KismetMathLibrary"), fn);
+        std::memcpy(p.Ptr("T"), gt.Ptr("ReturnValue"), size);
+        p.Set(arg, v).Call();
+        return p.Return<Vec3>();
+    }
+    Vec3 ToWorld(Vec3 local) { return Call("TransformLocation", "Location", local); }
+    Vec3 ToLocal(Vec3 world) { return Call("InverseTransformLocation", "Location", world); }
+    Vec3 DirToWorld(Vec3 local) { return Call("TransformDirection", "Direction", local); }
+};
+
+static const AttachPoint* FindAttachPoint(const std::string& componentName) {
+    for (auto& p : kAttachPoints)
+        if (componentName == p.name) return &p;
+    return nullptr;
+}
+
+// Attachments already on the gun (a loadout restores them from their saved transforms) are snapped
+// onto the Noveske's rail: their attach point keeps its position along the rail and moves onto the
+// rail line; a muzzle device moves onto the muzzle point.
+static int SnapMountedAttachments(Object gun, ActorFrame& frame) {
+    Params ga(gun, "GetAttachedActors");
+    ga.Set("bResetArray", true).Set("bRecursivelyIncludeAttachedActors", false).Call();
+    auto* arr = (GML_TArray*)ga.Ptr("OutActors");
+    int snapped = 0;
+    for (int i = 0; arr && i < arr->Num; i++) {
+        Object att(((GUObject**)arr->Data)[i]);
+        if (!att.IsA("GunAttachment")) continue;
+        Object ap = att.GetObj("AttachPoint");
+        if (!ap) continue;
+        Params loc(ap, "K2_GetComponentLocation");
+        loc.Call();
+        Vec3 now = frame.ToLocal(loc.Return<Vec3>());
+        const AttachPoint* rail = nullptr;
+        for (Object c : {Object(att.GetObj("RootComponent").GetObj("AttachParent")), att.GetObj("AttachedSpline"),
+                         att.GetObj("AttachablePoint")})
+            if (!rail && c) rail = FindAttachPoint(c.Name());
+        if (!rail) {  // restored onto the gun body: the nearest rail of its kind (HK and Noveske rails are < 1 cm apart)
+            char tag[64] = "";
+            API->NameToString(att.Get<uint64_t>("AttachPointTag"), tag, sizeof tag);
+            bool muzzle = !strcmp(tag, "MuzzleAttachLocation");
+            double best = 1.2;
+            for (auto& p : kAttachPoints) {
+                if (muzzle != !strcmp(p.name, "Fire Location")) continue;
+                Vec3 t = AttachTarget(p);
+                double d = muzzle ? std::hypot(t.x - now.x, t.y - now.y, t.z - now.z) : std::hypot(t.y - now.y, t.z - now.z);
+                if (d < best) { best = d; rail = &p; }
+            }
+        }
+        if (!rail) continue;
+        Vec3 want = AttachTarget(*rail);
+        if (strcmp(rail->name, "Fire Location") != 0) want.x = now.x;  // rails: keep the position along the rail
+        if (std::fabs(want.x - now.x) + std::fabs(want.y - now.y) + std::fabs(want.z - now.z) < 0.001) continue;
+        Vec3 d = frame.DirToWorld({want.x - now.x, want.y - now.y, want.z - now.z});
+        Params mv(att, "K2_AddActorWorldOffset");
+        mv.Set("DeltaLocation", d).Set("bSweep", false).Set("bTeleport", true).Call();
+        snapped++;
+    }
+    return snapped;
+}
+
 static void FitAttachPoints(Object actor) {
-    Params gt(actor, "GetTransform");
-    gt.Call();
-    GML_PropInfo xf;
-    API->GetPropertyInfo(API->FindProperty((GUStruct*)API->FindFunction(actor.Struct(), "GetTransform"), "ReturnValue"), &xf);
+    ActorFrame frame(actor);
     Params gc(actor, "K2_GetComponentsByClass");
     gc.Set("ComponentClass", FindClass("SceneComponent")).Call();
     auto* arr = (GML_TArray*)gc.Ptr("ReturnValue");
     int moved = 0;
     for (int i = 0; arr && i < arr->Num; i++) {
         Object c(((GUObject**)arr->Data)[i]);
-        std::string name = c.Name();
-        for (auto& p : kAttachPoints) {
-            if (name != p.name) continue;
-            // A non-default mesh offset moves the Noveske's rails with it.
-            Vec3 local{p.x + s_offset[0] - kDefaultOffset[0], p.y + s_offset[1] - kDefaultOffset[1],
-                       p.z + s_offset[2] - kDefaultOffset[2]};
-            Params tl(Lib("KismetMathLibrary"), "TransformLocation");
-            std::memcpy(tl.Ptr("T"), gt.Ptr("ReturnValue"), xf.size);
-            tl.Set("Location", local).Call();
+        if (const AttachPoint* p = FindAttachPoint(c.Name())) {
             Params sw(c, "K2_SetWorldLocation");
-            sw.Set("NewLocation", tl.Return<Vec3>()).Set("bSweep", false).Set("bTeleport", true).Call();
+            sw.Set("NewLocation", frame.ToWorld(AttachTarget(*p))).Set("bSweep", false).Set("bTeleport", true).Call();
             moved++;
         }
     }
     if (moved != (int)std::size(kAttachPoints))
         Warn("{}: moved {} of {} attach points - receiver layout differs from the HK416's", actor.Name(), moved,
              std::size(kAttachPoints));
+    if (int n = SnapMountedAttachments(actor, frame)) Log("{}: {} mounted attachment(s) moved onto the Noveske's rails", actor.Name(), n);
 }
 
 static void DressAsNoveske(Object actor) {
+    if (std::find(s_dressed.begin(), s_dressed.end(), actor.ptr) != s_dressed.end()) return;
     if (!BuildVisualAssets()) return;
     Object root = actor.GetObj("StaticMeshComponent");  // the HK416 mesh; also collision + physics
     if (!root) { Error("{} has no StaticMeshComponent", actor.FullName()); return; }
@@ -235,8 +306,174 @@ static void DressAsNoveske(Object actor) {
     hide.Set("bNewVisibility", false).Set("bPropagateToChildren", false).Call();  // children stay visible
     if (s_fitAttachments) FitAttachPoints(actor);
     s_dressed.push_back(actor.ptr);
-    Log("*** {} spawned from the Noveske entry: dressed as Noveske Chainsaw{} ***", actor.Name(),
-        s_fitAttachments ? ", attach points on its rails" : "");
+    Log("*** {} dressed as Noveske Chainsaw{} ***", actor.Name(), s_fitAttachments ? ", attach points on its rails" : "");
+}
+
+// ------------------------------------------------------------------ loadouts (team room, operations)
+//
+// The game saves each carried gun as a GunSerializable in SaveGames\SavedGun_<slot>.sav, with its
+// GunAsset stored as an object path, and rebuilds it from there at team-room start and in every
+// operation. The Noveske's GunAsset is created at runtime, so its path only resolves in the session
+// that wrote it; next launch the game can't find it and hands out its default rifle instead.
+// So once the game has saved the Noveske, the plugin re-saves that slot (with the game's own
+// SaveGameToSlot) with the HK416 donor as GunAsset - same receiver, handling and attachments - and
+// keeps the file's hash in its config. A loadout gun whose slot still holds exactly that file is the
+// Noveske. Without the plugin the slot simply loads as an HK416 with the same attachments.
+
+static std::string FStr8(Object o, const char* prop) {
+    char b[256] = "";
+    if (auto* s = (const GML_FString*)o.PropPtr(prop)) API->FStringToUtf8(s, b, sizeof b);
+    return b;
+}
+
+static std::wstring Widen8(const char* s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, nullptr, 0);
+    std::wstring w(n > 0 ? n - 1 : 0, L'\0');
+    if (n > 1) MultiByteToWideChar(CP_UTF8, 0, s, -1, w.data(), n);
+    return w;
+}
+
+static std::string ReadFileBytes(const std::wstring& path) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return {};
+    std::string s(GetFileSize(f, nullptr), '\0');
+    DWORD n = 0;
+    if (!ReadFile(f, s.data(), (DWORD)s.size(), &n, nullptr)) n = 0;
+    CloseHandle(f);
+    s.resize(n);
+    return s;
+}
+
+static std::string HashHex(const std::string& bytes) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (unsigned char c : bytes) h = (h ^ c) * 0x100000001b3ull;
+    return std::format("{:016x}-{}", h, bytes.size());
+}
+
+static std::wstring SaveGamesDir() {
+    static std::wstring dir;
+    if (dir.empty()) {
+        Params p(Lib("KismetSystemLibrary"), "GetProjectSavedDirectory");
+        p.Call();
+        char b[1024] = "";
+        if (auto* s = (const GML_FString*)p.Ptr("ReturnValue")) API->FStringToUtf8(s, b, sizeof b);
+        if (*b) dir = Widen8(b) + L"SaveGames\\";
+    }
+    return dir;
+}
+
+// [Loadouts] <slot> = <hash of the file while it holds the Noveske>, in the plugin's .cfg.
+static ConfigEntry<std::string> SlotRecord(const std::string& slot) {
+    return Config.Bind<std::string>("Loadouts", slot.c_str(), "",
+                                    "Written by the plugin: this save slot holds the Noveske (hash of its file).");
+}
+static std::string RecordedHash(const std::string& slot) { return SlotRecord(slot).Value(); }
+static void RecordHash(const std::string& slot, const std::string& hash) { SlotRecord(slot).Set(hash); }
+
+// Pointer to FGunSetupStruct.GunAsset inside a loaded GunSerializable.
+static GUObject** GunAssetField(Object save) {
+    GFProperty* setupProp = save ? API->FindProperty(save.Struct(), "GunSetup") : nullptr;
+    GML_PropInfo setup{}, asset{};
+    if (!setupProp || !API->GetPropertyInfo(setupProp, &setup) || !setup.structType) return nullptr;
+    GFProperty* assetProp = API->FindProperty(setup.structType, "GunAsset");
+    if (!assetProp || !API->GetPropertyInfo(assetProp, &asset)) return nullptr;
+    return (GUObject**)((uint8_t*)save.ptr + setup.offset + asset.offset);
+}
+
+// The gun a gear manager saved in slot `slotProp`, read with the game's own GetGunSetup.
+static GUObject* SavedGunAsset(Object gear, const char* slotProp) {
+    std::string slot = FStr8(gear, slotProp);
+    if (slot.empty()) return nullptr;
+    Params gg(gear, "GetGunSetup");
+    gg.SetString("SlotName", Widen8(slot.c_str())).Call();
+    GUObject** f = GunAssetField(gg.Get<GUObject*>("GunSetup"));
+    return f ? *f : nullptr;
+}
+
+static bool IsNoveskeSlot(const std::string& slot, GUObject* savedAsset) {
+    if (savedAsset && savedAsset == s_gun) return true;  // written this session, not re-saved yet
+    Object donor = FindObject(kDonor);
+    if (!savedAsset || savedAsset != donor.ptr) return false;
+    std::string h = RecordedHash(slot);
+    return !h.empty() && h == HashHex(ReadFileBytes(SaveGamesDir() + Widen8(slot.c_str()) + L".sav"));
+}
+
+// Re-save any gun slot the game wrote with the Noveske (or, from an earlier session, with a runtime
+// GunAsset path that no longer resolves) so it names the donor; remember the new file's hash.
+static void WatchLoadouts() {
+    static ULONGLONG next = 0;
+    static std::map<std::wstring, uint64_t> seen;  // file -> last write time
+    if (!s_gun || GetTickCount64() < next) return;
+    next = GetTickCount64() + 1000;
+    std::wstring dir = SaveGamesDir();
+    if (dir.empty()) return;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"SavedGun_*.sav").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        std::wstring file = fd.cFileName;
+        uint64_t stamp = ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime;
+        if (seen[file] == stamp) continue;
+        seen[file] = stamp;
+        std::wstring stemW = file.substr(0, file.size() - 4);
+        char slotBuf[260] = "";
+        WideCharToMultiByte(CP_UTF8, 0, stemW.c_str(), -1, slotBuf, sizeof slotBuf, nullptr, nullptr);
+        std::string slot = slotBuf;
+        std::string raw = ReadFileBytes(dir + file);
+        Params lg(Lib("GameplayStatics"), "LoadGameFromSlot");
+        lg.SetString("SlotName", stemW).Set("UserIndex", (int32_t)0).Call();
+        Object save = lg.Return<GUObject*>();
+        GUObject** asset = GunAssetField(save);
+        if (!asset) continue;
+        // A runtime GunAsset path in the file can only be this plugin's Noveske.
+        size_t t = raw.find("/Engine/Transient.");
+        bool staleNoveske = !*asset && t != std::string::npos && raw.find(".GunAsset_C_", t) != std::string::npos;
+        if (*asset == s_gun || staleNoveske) {
+            Object donor = FindObject(kDonor);
+            if (!donor) continue;
+            *asset = donor.ptr;
+            Params sv(Lib("GameplayStatics"), "SaveGameToSlot");
+            sv.SetObj("SaveGameObject", save).SetString("SlotName", stemW).Set("UserIndex", (int32_t)0).Call();
+            if (!sv.Return<bool>()) { Error("could not re-save loadout slot {}", slot); continue; }
+            std::string hash = HashHex(ReadFileBytes(dir + file));
+            RecordHash(slot, hash);
+            WIN32_FILE_ATTRIBUTE_DATA a;
+            if (GetFileAttributesExW((dir + file).c_str(), GetFileExInfoStandard, &a))
+                seen[file] = ((uint64_t)a.ftLastWriteTime.dwHighDateTime << 32) | a.ftLastWriteTime.dwLowDateTime;
+            Log("loadout slot {} holds the Noveske: re-saved with a stable reference{}", slot,
+                staleNoveske ? " (repaired a save from an earlier session)" : "");
+        } else if (!RecordedHash(slot).empty() && !IsNoveskeSlot(slot, *asset)) {
+            RecordHash(slot, "");  // the game saved a different gun there since
+            Log("loadout slot {} no longer holds the Noveske", slot);
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+// A receiver the gear manager rebuilt from your saved loadout (team room start, operations): it is
+// ours if it became a player's PrimaryGun/SecondaryGun and that slot holds the Noveske.
+static bool ResolveLoadout(Object actor) {
+    for (auto& gear : FindAllOf("BP_GearManagerComponent_C")) {
+        // The save slots on this PC are the local player's; another player's gun is not ours to judge.
+        Object pawn(API->GetOuter(gear.ptr));
+        if (pawn.IsA("Pawn")) {
+            Params lc(pawn, "IsLocallyControlled");
+            lc.Call();
+            if (!lc.Return<bool>()) continue;
+        }
+        const char* slotProp = gear.GetObj("PrimaryGun").ptr == actor.ptr     ? "PrimaryGunSetupSlotName"
+                               : gear.GetObj("SecondaryGun").ptr == actor.ptr ? "SecondaryGunSetupSlotName"
+                                                                               : nullptr;
+        if (!slotProp) continue;
+        GUObject* saved = SavedGunAsset(gear, slotProp);
+        std::string slot = FStr8(gear, "GunSetupSlotName") + "_" + FStr8(gear, slotProp);  // SavedGun_MainPrimary
+        bool noveske = IsNoveskeSlot(slot, saved);
+        Log("{} loaded from {} ({}): saved gun '{}' -> {}", actor.Name(), slot, Object(API->GetOuter(gear.ptr)).Name(),
+            saved ? Object(saved).Name() : std::string("?"), noveske ? "Noveske" : "not the Noveske");
+        if (noveske) DressAsNoveske(actor);
+        return true;
+    }
+    return false;
 }
 
 // The spawner's menu items are WB_CustomizationItemGun widgets; the gun they stand for is their
@@ -275,8 +512,9 @@ static void ResolvePending() {
             if (picked == s_gun) DressAsNoveske(actor);
             done = true;
         }
-        // Not a station spawn (loadout, mission, ...): stays an HK416.
-        if (!done && GetTickCount64() - p.since > 2000) done = true;
+        if (!done) done = ResolveLoadout(actor);
+        // Neither a station spawn nor a loadout gun (world pickup, other player's gun...): stays an HK416.
+        if (!done && GetTickCount64() - p.since > 5000) done = true;
         if (done) s_pending.erase(s_pending.begin() + i);
         else i++;
     }
@@ -306,7 +544,10 @@ static void InstallVisuals() {
         }
         if (s_receiverClass && self.Class() == s_receiverClass) s_pending.push_back({self.ptr, GetTickCount64()});
     });
-    On(GML_EVENT_TICK, [](void*) { ResolvePending(); });
+    On(GML_EVENT_TICK, [](void*) {
+        ResolvePending();
+        WatchLoadouts();
+    });
     // Build the mesh and textures while the first level loads, not when the gun is first spawned.
     On(GML_EVENT_WORLD_BEGIN_PLAY, [](void*) { BuildVisualAssets(); });
 }

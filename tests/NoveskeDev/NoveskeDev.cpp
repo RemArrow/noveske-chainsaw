@@ -280,6 +280,45 @@ static void MountAll(Object gun) {
     Mount(gun, "Muzzle_Suppressor_Surefire_RC3_C", "Fire Location");
 }
 
+// ---- "loadout" scenario: what an operation does with the guns you take into it. The gear manager
+// saves each gun as a GunSerializable (FGunSetupStruct: GunAsset, parts, attachments, colours) and
+// the operation rebuilds it with LoadGunSetups -> Spawn Gun Setup Internal (and Merge Gun).
+
+static std::string s_scenario = "station";
+static Object s_gear, s_stationNoveske;
+static GUObject* s_primaryBefore = nullptr;
+
+static std::string FStr8(Object o, const char* prop) {
+    char b[256] = "";
+    if (auto* s = (const GML_FString*)o.PropPtr(prop)) API->FStringToUtf8(s, b, sizeof b);
+    return b;
+}
+
+static void LogMeshes(Object gun) {
+    for (const char* cls : {"StaticMeshComponent", "DynamicMeshComponent", "RealtimeMeshComponent"}) {
+        Params gc(gun, "K2_GetComponentsByClass");
+        gc.Set("ComponentClass", FindClass(cls)).Call();
+        auto* arr = (GML_TArray*)gc.Ptr("ReturnValue");
+        for (int i = 0; arr && i < arr->Num; i++) {
+            Object c(((GUObject**)arr->Data)[i]);
+            Params vis(c, "IsVisible"); vis.Call();
+            Log("  {} [{}] visible={} hiddenInGame={} tags=[{}]", c.Name(), Object((GUObject*)c.Class()).Name(),
+                vis.Return<bool>(), c.GetBool("bHiddenInGame"), Tags(c));
+        }
+    }
+}
+
+static void LogSetup(const std::string& slot) {
+    Params gg(s_gear, "GetGunSetup");
+    gg.SetString("SlotName", std::wstring(slot.begin(), slot.end())).Call();
+    Object save = gg.Get<GUObject*>("GunSetup");
+    if (!save) { Log("slot '{}': no setup", slot); return; }
+    auto* gs = (uint8_t*)save.PropPtr("GunSetup");  // FGunSetupStruct: GunAsset @0, SpawnedReceiver @8
+    Object asset = gs ? *(GUObject**)gs : nullptr, spawned = gs ? *(GUObject**)(gs + 8) : nullptr;
+    Log("slot '{}': GunAsset={} ('{}') path={} SpawnedReceiver={}", slot, asset.Name(), TextOf(asset, "DisplayName"),
+        asset.Path(), spawned.Name());
+}
+
 static void Step() {
     if (s_wait > 0) { s_wait--; return; }
     switch (s_step) {
@@ -372,9 +411,86 @@ static void Step() {
             s_step = 30;
             return;
         case 30:
+            if (s_scenario == "loadout") { s_step = 40; return; }
             s_hold = Object();
             Select(s_hk);
             s_step = 4; s_wait = 90;
+            return;
+        case 40: {  // save the dressed Noveske the way the game does
+            s_stationNoveske = s_hold;
+            s_gear = FindFirstOf("BP_GearManagerComponent_C");
+            if (!s_gear) { Error("no gear manager"); s_step = 99; return; }
+            Log("LOADOUT gear {} primary slot '{}' secondary slot '{}' gun slot '{}' PrimaryGun={}", s_gear.FullName(),
+                FStr8(s_gear, "PrimaryGunSetupSlotName"), FStr8(s_gear, "SecondaryGunSetupSlotName"),
+                FStr8(s_gear, "GunSetupSlotName"), s_gear.GetObj("PrimaryGun").Name());
+            Log("LOADOUT >>> SaveGunSetup({})", s_stationNoveske.Name());
+            Params sv(s_gear, "SaveGunSetup");
+            sv.SetObj("GunReceiver", s_stationNoveske).Call();
+            s_step = 41; s_wait = 60;
+            return;
+        }
+        case 41:
+            LogSetup(FStr8(s_gear, "PrimaryGunSetupSlotName"));
+            LogSetup(FStr8(s_gear, "SecondaryGunSetupSlotName"));
+            s_primaryBefore = s_gear.GetObj("PrimaryGun").ptr;
+            s_hold = Object();
+            Log("LOADOUT >>> LoadGunSetups (what an operation runs)");
+            {
+                Params ld(s_gear, "LoadGunSetups");
+                ld.Call();
+            }
+            s_step = 42; s_wait = 300;
+            return;
+        case 42: {
+            Object pg = s_gear.GetObj("PrimaryGun");
+            Log("LOADOUT PrimaryGun after load: {} (before: {}), class {}, attached to {}", pg.Name(),
+                Object(s_primaryBefore).Name(), Object((GUObject*)pg.Class()).Name(),
+                Object(pg.GetObj("RootComponent").GetObj("AttachParent")).Name());
+            if (pg) {
+                LogMeshes(pg);
+                Params ga(pg, "GetAttachedActors");
+                ga.Set("bResetArray", true).Set("bRecursivelyIncludeAttachedActors", false).Call();
+                auto* arr = (GML_TArray*)ga.Ptr("OutActors");
+                for (int i = 0; arr && i < arr->Num; i++) {
+                    Object att(((GUObject**)arr->Data)[i]);
+                    Object ap = att.GetObj("AttachPoint");
+                    if (!ap) continue;
+                    Vec l = ToActor(pg, CompLocation(ap));
+                    Log("LOADOUT   {} on {} (AttachedSpline {}): attach point at ({:.3f},{:.3f},{:.3f})", att.Name(),
+                        Object(att.GetObj("RootComponent").GetObj("AttachParent")).Name(), att.GetObj("AttachedSpline").Name(),
+                        l.x, l.y, l.z);
+                }
+                Params det(pg, "K2_DetachFromActor");
+                det.Set("LocationRule", (uint8_t)1).Set("RotationRule", (uint8_t)1).Set("ScaleRule", (uint8_t)1).Call();
+                Freeze(pg);
+                s_hold = pg;
+            }
+            s_step = 43; s_wait = 200;
+            return;
+        }
+        case 43:
+            Log("SNAP loadout");
+            s_wait = 900;
+            s_step = 7;
+            return;
+        case 60: {  // "operation" scenario: the gun the game hands you in a real operation map
+            s_gear = FindFirstOf("BP_GearManagerComponent_C");
+            Object pg = s_gear ? s_gear.GetObj("PrimaryGun") : Object();
+            Log("OPERATION gear {} PrimaryGun {} attached to {}", s_gear.FullName(), pg.FullName(),
+                pg ? Object(pg.GetObj("RootComponent").GetObj("AttachParent")).Name() : std::string("-"));
+            if (!pg) { Error("no primary gun in the operation"); s_step = 7; return; }
+            LogMeshes(pg);
+            Params det(pg, "K2_DetachFromActor");
+            det.Set("LocationRule", (uint8_t)1).Set("RotationRule", (uint8_t)1).Set("ScaleRule", (uint8_t)1).Call();
+            Freeze(pg);
+            s_hold = pg;
+            s_step = 61; s_wait = 200;
+            return;
+        }
+        case 61:
+            Log("SNAP operation");
+            s_wait = 900;
+            s_step = 7;
             return;
         case 6:
             MountAll(s_hold);
@@ -394,16 +510,25 @@ static void Step() {
 }
 
 GML_AWAKE() {
+    s_scenario = Config.Bind<std::string>("Test", "Scenario", "station",
+        "station: spawn the Noveske and the HK416 at the gun station and mount attachments.\n"
+        "loadout: spawn the Noveske, save it as a gun setup and rebuild it like an operation does.").Value();
+    Log("scenario: {}", s_scenario);
     On(GML_EVENT_WORLD_BEGIN_PLAY, [](void* gm) {
         std::string level = Object((GUObject*)gm).Path();
         Log("level: {}", level);
+        const char* opMap = "/Game/Maps/CargoShip/CargoShip";
         if (level.find("/Game/Maps/MainMenu/") == 0) {
+            const char* target = s_scenario == "operation" ? opMap : "/Game/Maps/TeamRoom/Teamroom";
             Params p(Lib("GameplayStatics"), "OpenLevel");
             p.SetObj("WorldContextObject", Object(API->WorldContext()))
-                .Set("LevelName", API->MakeName("/Game/Maps/TeamRoom/Teamroom"))
+                .Set("LevelName", API->MakeName(target))
                 .Set("bAbsolute", true)
                 .Call();
-            Log("opening the team room");
+            Log("opening {}", target);
+        } else if (s_scenario == "operation" && level.find(opMap) == 0) {
+            s_step = 60;
+            s_wait = 600;  // let the player spawn with their loadout
         } else if (level.find("Teamroom") != std::string::npos) {
             s_step = 0;
             s_wait = 240;  // let the room settle

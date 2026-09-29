@@ -47,6 +47,16 @@ developer); all trademarks belong to their owners.
    5.5 mm below its handguard. On dressed guns they are moved onto the Noveske's own rail tops,
    M-LOK faces and barrel end, which `tools/align` finds by ray-casting the mesh. The muzzle point
    moves 1.1 cm forward, and shots come from there too.
+6. **Loadouts and operations.** The game saves the guns you carry to `SaveGames\SavedGun_<slot>.sav`
+   and rebuilds them at team-room start and in every operation. Those rebuilt guns are recognised
+   and dressed too: a receiver that becomes a player's `PrimaryGun`/`SecondaryGun` is checked
+   against the save slot it was loaded from. The runtime Noveske asset's object path changes
+   between launches, which used to turn a saved Noveske into the game's default rifle. So once the
+   game saves the Noveske, the plugin re-saves that slot with the game's own `SaveGameToSlot`,
+   naming the HK416 donor. It keeps the file's hash under `[Loadouts]` in its `.cfg`, and a slot
+   whose file still has that hash is the Noveske. Saves written by earlier versions are repaired
+   at startup. Attachments restored from a save are snapped onto the Noveske's rails. Without the
+   plugin, such a slot loads as an HK416 with the same attachments.
 
 ## Requirements
 
@@ -118,7 +128,7 @@ GML checkout other than `external/gml`.
 | `tools/prepare_runtime.py` | source FBX + 4K PBR textures → `Assets\` (the build input that gets encrypted and embedded): OBJ with 6 material groups; per part Diffuse, Normal and ORM PNGs at 2K/1K, with linear data pre-encoded for the game's sRGB import |
 | `tools/pack` (`build\pack.exe`) | `Assets\` → `build\gen\payload.bin` + `payload_key.h`: the encrypted payload and this build's key (see [Asset protection](#asset-protection)); run by `build.bat` |
 | `tools/align` (`build\align.exe`) | `align <HK_416_279_v2.uexp> Assets\noveske.obj [x y z]`: computes the offset from the cooked HK416 mesh (extract it with retoc `to-legacy -f HK_416_279`), then prints the plugin's `kAttachPoints` table for that offset (or for `x y z`) |
-| `tests/NoveskeDev` | in-game test harness, never installed by `build.bat`. It loads the team room and presses the spawner's Noveske item through the game's own button handler. It then logs the receiver's attach points (`ATTACH`), mounts a foregrip, optic and suppressor through `AttachToServer` (`MOUNT`), and poses the gun in front of the headset camera for screenshots. It does the same for a stock HK416 to compare |
+| `tests/NoveskeDev` | in-game test harness, never installed by `build.bat`. It loads the team room and presses the spawner's Noveske item through the game's own button handler. It then logs the receiver's attach points (`ATTACH`), mounts a foregrip, optic and suppressor through `AttachToServer` (`MOUNT`), and poses the gun in front of the headset camera for screenshots. It does the same for a stock HK416 to compare. `[Test] Scenario` in its `.cfg` picks the run: `station` (the above), `loadout` (saves the Noveske with the game's `SaveGunSetup` and rebuilds it with `LoadGunSetups`, as an operation does) or `operation` (loads the CargoShip operation and checks the rifle you're given) |
 
 ## Known limitations
 
@@ -127,5 +137,9 @@ GML checkout other than `external/gml`.
   about 3 cm further forward.
 - With a muzzle device or suppressor mounted, the Noveske's own flash hider stays; it sits inside
   the suppressor, as the HK416's does.
-- A Noveske saved into a loadout comes back as an HK416: only gun-station spawns are dressed.
+- Multiplayer (untested): the Noveske look is local. Only your own loadout gun is checked against
+  your save slots, and other players get the HK416 donor from the game, so they see an HK416 with
+  the same attachments.
+- If you save the Noveske and quit within about a second, before the plugin re-saves the slot,
+  the next launch repairs it (tested). If the plugin is removed, the slot loads as an HK416.
 - Runtime textures are uncompressed and have no mipmaps, so expect some shimmer at a distance.
