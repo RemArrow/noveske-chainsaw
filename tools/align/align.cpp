@@ -208,6 +208,13 @@ int main(int argc, char** argv) {
     std::vector<V> hk = bufs[0];
     std::vector<Tri> tris;
     std::vector<V> nov = LoadObj(argv[2], &tris);
+    // The flash hider is its own mesh (noveske_muzzle.obj next to it); the bore and muzzle point come from it.
+    std::string muzzlePath = std::string(argv[2]);
+    muzzlePath = muzzlePath.substr(0, muzzlePath.find_last_of("/\\") + 1) + "noveske_muzzle.obj";
+    std::vector<Tri> mtris;
+    std::vector<V> mverts = LoadObj(muzzlePath.c_str(), &mtris);
+    for (auto& t : mtris) tris.push_back({t.a + (int)nov.size(), t.b + (int)nov.size(), t.c + (int)nov.size(), t.part});
+    nov.insert(nov.end(), mverts.begin(), mverts.end());
     printf("%zu position buffer(s) in the HK file (using LOD0)\n", bufs.size());
     Bounds("HK416 static (LOD0)", hk);
     Bounds("Noveske (as rendered)", nov);

@@ -96,7 +96,7 @@ static void Hold() {
     fp.Set("InRot", flat).Call();
     Vec f = fp.Return<Vec>();
     Vec at{cam.x + f.x * 60, cam.y + f.y * 60, cam.z - 2};  // whole gun in frame
-    Rot side{0, rot.yaw + 90, 0};  // show the rifle's left side, muzzle to the right
+    Rot side{0, rot.yaw + 90, 0};  // show the rifle's right (ejection port) side, muzzle to the right
     Params mv(s_hold, "K2_SetActorLocationAndRotation");
     mv.Set("NewLocation", at).Set("NewRotation", side).Set("bSweep", false).Set("bTeleport", true).Call();
 }
@@ -319,9 +319,197 @@ static void LogSetup(const std::string& slot) {
         asset.Path(), spawned.Name());
 }
 
+// ---- "movables" scenario: what drives the gun's moving parts, and what the magazine is made of.
+
+static Rot WorldRotToActor(Object actor, Rot world) {
+    Params gt(actor, "GetTransform");
+    gt.Call();
+    Params inv(Lib("KismetMathLibrary"), "InverseTransformRotation");
+    std::memcpy(inv.Ptr("T"), gt.Ptr("ReturnValue"), XfSize());
+    inv.Set("Rotation", world).Call();
+    return inv.Return<Rot>();
+}
+
+static void DumpBoneNames(Object o, const char* who) {
+    for (GUStruct* s = o.Struct(); s; s = API->GetSuper(s))
+        for (GFProperty* p = API->NextProperty(s, nullptr); p; p = API->NextProperty(s, p)) {
+            char n[128];
+            API->GetPropertyName(p, n, sizeof n);
+            GML_PropInfo i;
+            API->GetPropertyInfo(p, &i);
+            if (!strstr(n, "Bone") || !i.type || strcmp(i.type, "NameProperty")) continue;
+            char v[128] = "";
+            API->NameToString(*(uint64_t*)((uint8_t*)o.ptr + i.offset), v, sizeof v);
+            Log("MOVABLES   {} {} = {}", who, n, v);
+        }
+}
+
+// Numeric/bool properties an object's class adds (down to the engine's ActorComponent/Actor).
+static void DumpNumeric(Object o, const char* who) {
+    for (GUStruct* s = o.Struct(); s; s = API->GetSuper(s)) {
+        std::string sn = Object((GUObject*)s).Name();
+        if (sn == "ActorComponent" || sn == "SceneComponent" || sn == "PrimitiveComponent" || sn == "Actor") break;
+        for (GFProperty* p = API->NextProperty(s, nullptr); p; p = API->NextProperty(s, p)) {
+            char n[128];
+            API->GetPropertyName(p, n, sizeof n);
+            GML_PropInfo i;
+            API->GetPropertyInfo(p, &i);
+            if (!i.type) continue;
+            auto* at = (uint8_t*)o.ptr + i.offset;
+            std::string t = i.type, v;
+            if (t == "FloatProperty") v = std::format("{:.3f}", *(float*)at);
+            else if (t == "DoubleProperty") v = std::format("{:.3f}", *(double*)at);
+            else if (t == "IntProperty") v = std::format("{}", *(int32_t*)at);
+            else if (t == "BoolProperty") v = (at[i.boolByteOffset] & i.boolFieldMask) ? "true" : "false";
+            else if (t == "ByteProperty" || t == "EnumProperty") v = std::format("{}", *at);
+            else continue;
+            Log("NUMERIC {} {}.{} = {}", who, sn, n, v);
+        }
+    }
+}
+
+// A screenshot rendered by the game itself (Saved\Screenshots); the runner names it after the SNAP line.
+static void Snap(const char* name) {
+    Log("SNAP {}", name);
+    API->ExecConsoleCommand("shot");
+}
+
+// The Noveske parts riding on the movables' bones, and whether the HK416's parts are still drawn.
+static Object DumpDressed(Object gun, const char* when) {
+    Object mov = gun.GetObj("Movables");
+    Params iv(mov, "IsVisible"); iv.Call();
+    Log("DRESSED [{}] HK movables visible: {}", when, iv.Return<bool>());
+    Params ch(mov, "GetChildrenComponents");
+    ch.Set("bIncludeAllDescendants", false).Call();
+    auto* arr = (GML_TArray*)ch.Ptr("Children");
+    Object trigger;
+    for (int i = 0; arr && i < arr->Num; i++) {
+        Object c(((GUObject**)arr->Data)[i]);
+        Params sn(c, "GetAttachSocketName"); sn.Call();
+        char sock[64] = "";
+        API->NameToString(sn.Return<uint64_t>(), sock, sizeof sock);
+        Params r(c, "K2_GetComponentRotation"); r.Call();
+        Rot rr = WorldRotToActor(gun, r.Return<Rot>());
+        Vec l = ToActor(gun, CompLocation(c));
+        Log("DRESSED   {} on {} at ({:.3f},{:.3f},{:.3f}) rot ({:.1f},{:.1f},{:.1f})", c.Name(), sock, l.x, l.y, l.z, rr.pitch, rr.yaw, rr.roll);
+        if (!strcmp(sock, "RootTrigger")) trigger = c;
+    }
+    Object mag = gun.GetObj("CurrentMagazine");
+    if (mag) {
+        Params mc(mag, "K2_GetComponentsByClass");
+        mc.Set("ComponentClass", FindClass("PrimitiveComponent")).Call();
+        auto* ma = (GML_TArray*)mc.Ptr("ReturnValue");
+        for (int i = 0; ma && i < ma->Num; i++) {
+            Object c(((GUObject**)ma->Data)[i]);
+            Params vis(c, "IsVisible"); vis.Call();
+            Log("DRESSED   magazine {} [{}] visible {}", c.Name(), Object((GUObject*)c.Class()).Name(), vis.Return<bool>());
+        }
+    }
+    return trigger;
+}
+
+static void DumpMovables(Object gun) {
+    Object mov = gun.GetObj("Movables");
+    Params nb(mov, "GetNumBones"); nb.Call();
+    int n = nb.Return<int32_t>();
+    Log("MOVABLES component {} [{}] mesh {} bones {} visible {}", mov.Name(), Object((GUObject*)mov.Class()).Name(),
+        mov.GetObj("SkeletalMesh").Name(), n, mov.GetBool("bVisible"));
+    for (int i = 0; i < n; i++) {
+        Params bn(mov, "GetBoneName"); bn.Set("BoneIndex", (int32_t)i).Call();
+        uint64_t name = bn.Return<uint64_t>();
+        char b[128] = "";
+        API->NameToString(name, b, sizeof b);
+        Params sl(mov, "GetSocketLocation"); *(uint64_t*)sl.Ptr("InSocketName") = name; sl.Call();
+        Params sr(mov, "GetSocketRotation"); *(uint64_t*)sr.Ptr("InSocketName") = name; sr.Call();
+        Vec l = ToActor(gun, sl.Return<Vec>());
+        Rot r = WorldRotToActor(gun, sr.Return<Rot>());
+        Log("MOVABLES   bone {:2} {:26} at ({:7.3f},{:7.3f},{:7.3f}) rot ({:6.1f},{:6.1f},{:6.1f})", i, b, l.x, l.y, l.z, r.pitch, r.yaw, r.roll);
+    }
+    DumpBoneNames(gun, "receiver");
+    Params gc(gun, "K2_GetComponentsByClass");
+    gc.Set("ComponentClass", FindClass("ActorComponent")).Call();
+    auto* arr = (GML_TArray*)gc.Ptr("ReturnValue");
+    for (int i = 0; arr && i < arr->Num; i++) {
+        Object c(((GUObject**)arr->Data)[i]);
+        DumpBoneNames(c, c.Name().c_str());
+    }
+    // magazine
+    auto* acc = (GML_TArray*)gun.PropPtr("AcceptedMagazines");
+    for (int i = 0; acc && i < acc->Num; i++) Log("MOVABLES   accepted magazine {}", Object(((GUObject**)acc->Data)[i]).FullName());
+    Object mag = gun.GetObj("CurrentMagazine");
+    Log("MOVABLES magazine {} [{}] attached to {}", mag.Name(), Object((GUObject*)mag.Class()).FullName(),
+        mag ? Object(mag.GetObj("RootComponent").GetObj("AttachParent")).Name() : std::string("-"));
+    if (mag) {
+        Params mc(mag, "K2_GetComponentsByClass");
+        mc.Set("ComponentClass", FindClass("SceneComponent")).Call();
+        auto* ma = (GML_TArray*)mc.Ptr("ReturnValue");
+        for (int i = 0; ma && i < ma->Num; i++) {
+            Object c(((GUObject**)ma->Data)[i]);
+            Vec l = ToActor(gun, CompLocation(c));
+            Object mesh = c.IsA("StaticMeshComponent") ? c.GetObj("StaticMesh") : c.IsA("SkinnedMeshComponent") ? c.GetObj("SkeletalMesh") : Object();
+            Params vis(c, "IsVisible"); vis.Call();
+            Log("MOVABLES   mag comp {} [{}] mesh {} visible {} at ({:.3f},{:.3f},{:.3f})", c.Name(),
+                Object((GUObject*)c.Class()).Name(), mesh.Name(), vis.Return<bool>(), l.x, l.y, l.z);
+        }
+        DumpBoneNames(mag, "magazine");
+    }
+}
+
 static void Step() {
     if (s_wait > 0) { s_wait--; return; }
     switch (s_step) {
+        case 70:  // at rest: parts on bones, HK parts hidden, magazine dressed
+            DumpDressed(s_hold, "rest");
+            DumpNumeric(s_hold.GetObj("ChargingHandle"), "ChargingHandle");
+            DumpNumeric(s_hold.GetObj("FireChamber"), "FireChamber");
+            Snap("rest");
+            s_step = 71; s_wait = 400;
+            return;
+        case 71: {  // pull the trigger through the game's own value: the Noveske trigger must follow
+            s_hold.Set("CurrentTrigger", 1.0f);
+            s_hold.Set("bTriggerIsEngaged", true);
+            Log("DRESSED set CurrentTrigger = 1");
+            s_step = 72; s_wait = 60;
+            return;
+        }
+        case 72:
+            DumpDressed(s_hold, "trigger pulled");
+            Snap("trigger");
+            s_step = 73; s_wait = 400;
+            return;
+        case 73:  // release the trigger, pull the charging handle all the way back
+            s_hold.Set("CurrentTrigger", 0.0f);
+            s_hold.Set("bTriggerIsEngaged", false);
+            s_hold.GetObj("ChargingHandle").Set("CurrentProgress", 1.0f);
+            Log("DRESSED set ChargingHandle.CurrentProgress = 1");
+            s_step = 74; s_wait = 60;
+            return;
+        case 74:
+            DumpDressed(s_hold, "handle pulled");
+            DumpNumeric(s_hold.GetObj("ChargingHandle"), "ChargingHandle");
+            Snap("charged");
+            s_step = 75; s_wait = 400;
+            return;
+        case 75:  // attachments: rails now run the Noveske's full handguard; the flash hider hides under a suppressor
+            s_hold.GetObj("ChargingHandle").Set("CurrentProgress", 0.0f);
+            MountAll(s_hold);
+            s_step = 76; s_wait = 200;
+            return;
+        case 76: {
+            DumpAttachPoints(s_hold);
+            Params gc(s_hold, "K2_GetComponentsByClass");
+            gc.Set("ComponentClass", FindClass("DynamicMeshComponent")).Call();
+            auto* arr = (GML_TArray*)gc.Ptr("ReturnValue");
+            for (int i = 0; arr && i < arr->Num; i++) {
+                Object c(((GUObject**)arr->Data)[i]);
+                Params gd(c, "GetDynamicMesh"); gd.Call();
+                Params tc(Object(gd.Return<GUObject*>()), "GetTriangleCount"); tc.Call();
+                Log("DRESSED   mesh {} ({} triangles) visible {}", c.Name(), tc.Return<int32_t>(), c.GetBool("bVisible"));
+            }
+            Snap("mounted");
+            s_step = 7; s_wait = 400;
+            return;
+        }
         case 0: {  // find everything
             auto stations = FindAllOf("CustomizationStation_Gun_C");
             Log("{} station(s)", stations.size());
@@ -399,6 +587,10 @@ static void Step() {
                         c.GetBool("bHiddenInGame"), l.x, l.y, l.z);
                 }
             }
+            if (s_scenario == "movables") {
+                s_step = 70; s_wait = 120;  // the magazine is dressed after two steady quarter-second checks
+                return;
+            }
             DumpAttachPoints(s_hold);
             MountAll(s_hold);
         }
@@ -406,7 +598,7 @@ static void Step() {
             s_step = 31;
             return;
         case 31:
-            Log("SNAP noveske");
+            Snap("noveske");
             s_wait = 900;  // hold still until the screenshot is taken (fast without a headset)
             s_step = 30;
             return;
@@ -469,7 +661,7 @@ static void Step() {
             return;
         }
         case 43:
-            Log("SNAP loadout");
+            Snap("loadout");
             s_wait = 900;
             s_step = 7;
             return;
@@ -488,7 +680,7 @@ static void Step() {
             return;
         }
         case 61:
-            Log("SNAP operation");
+            Snap("operation");
             s_wait = 900;
             s_step = 7;
             return;
@@ -498,7 +690,7 @@ static void Step() {
             s_step = 8;
             return;
         case 8:
-            Log("SNAP hk416");
+            Snap("hk416");
             s_wait = 900;
             s_step = 7;
             return;

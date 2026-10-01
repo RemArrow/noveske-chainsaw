@@ -3,7 +3,7 @@
 //
 //   pack <Assets dir> <payload.bin> <payload_key.h>
 //
-// Packs noveske.obj and every *.png in the Assets folder, named by file stem ("noveske",
+// Packs every *.obj and *.png in the Assets folder, named by file stem ("noveske", "noveske_bolt",
 // "Body_Diffuse", ...). Each asset is LZMS-compressed when that saves space, then AES-256-GCM
 // encrypted with a key that is random for every build. The key goes to payload_key.h, split into
 // two XOR halves, for the plugin to compile in.
@@ -54,7 +54,7 @@ int main(int argc, char** argv) {
     std::vector<Item> items;
     for (auto& de : fs::directory_iterator(argv[1])) {
         auto ext = de.path().extension().string();
-        if (de.path().filename() == "noveske.obj" || ext == ".png")
+        if (ext == ".obj" || ext == ".png")
             items.push_back({de.path().stem().string(), ReadAll(de.path())});
     }
     if (items.empty()) { printf("pack: no assets in %s\n", argv[1]); return 1; }

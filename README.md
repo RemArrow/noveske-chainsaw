@@ -30,13 +30,13 @@ developer); all trademarks belong to their owners.
    attachment sockets and moving parts. When the gun station spawns that receiver, the plugin
    checks which menu item was picked in *that station's* spawner widget. The selection event
    passes the item widget, and its `WeaponItem` is the gun.
-3. **Visuals.** Only that actor gets a `DynamicMeshComponent` with the Noveske mesh. The mesh uses
-   six instances of the game's weapon shader `M_DefaultShader`, one per part, fed `Diffuse` /
-   `Normal` / `ORM` textures. The mesh and all 18 textures are **built into `NoveskeChainsaw.dll`
-   encrypted** (see [Asset protection](#asset-protection)) and loaded from memory with GML 2.2's
+3. **Visuals.** Only that actor gets `DynamicMeshComponent`s with the Noveske's meshes. They use
+   seven instances of the game's weapon shader `M_DefaultShader`, one per texture set (body,
+   handguard, stock, grip, muzzle, FEER, PMAG), fed `Diffuse` / `Normal` / `ORM` textures. All
+   meshes and textures are **built into `NoveskeChainsaw.dll` encrypted** (see
+   [Asset protection](#asset-protection)) and loaded from memory with GML 2.2's
    `ImportDynamicMeshFromMemory` / `ImportTextureFromMemory`, so the plugin is a single file.
-   The HK416's own mesh is hidden; its collision, physics, trigger, bolt, magazine and attachment
-   rails stay in place.
+   The HK416's mesh is hidden; its collision, physics and handling stay.
 4. **Alignment.** The mesh is offset so the Noveske's lower receiver sits on the HK416's: its
    trigger, selector, bolt catch and magazine line up. The default offset was computed by
    `tools/align`, a translation-only trimmed ICP of the Noveske lower onto the HK416 lower
@@ -45,8 +45,24 @@ developer); all trademarks belong to their owners.
    splines (two Picatinny, seven M-LOK) and its `Fire Location`. On the HK416 those sit on the
    HK416's rails: the optic would float 4 mm above the Noveske's top rail and a foregrip hang
    5.5 mm below its handguard. On dressed guns they are moved onto the Noveske's own rail tops,
-   M-LOK faces and barrel end, which `tools/align` finds by ray-casting the mesh. The muzzle point
-   moves 1.1 cm forward, and shots come from there too.
+   M-LOK faces and barrel end, which `tools/align` finds by ray-casting the mesh. The rails also run
+   the Noveske's full handguard length (to x = 33.5 cm, not the HK416's 30.5), and the muzzle point
+   moves 1.1 cm forward; shots come from there too. The Noveske's flash hider is hidden while a muzzle
+   device or suppressor is mounted in its place.
+7. **Moving parts.** The game animates a gun's moving parts as bones of its "movables" skeleton
+   (`GunMovablesMeshComponent`, a PoseableMesh the gun code poses by bone name). The Noveske's own
+   parts ride those bones: bolt carrier (`RootBoltCarrierGroup`), charging handle, dust cover,
+   trigger, selector, bolt catch (`RootBoltRelease`) and both magazine releases. Each is attached
+   to its bone at the inverse of the bone's reference pose, so it sits right whatever the gun is
+   doing when it is dressed. The HK416's parts are hidden, but their bones keep being posed
+   (`VisibilityBasedAnimTickOption` = always), so racking, firing, trigger pull, selector and bolt
+   catch all move the Noveske's parts. The pack has no separate bolt catch or releases; the asset
+   script cuts them out of the body mesh.
+8. **Magazines.** The HK416 takes the game's windowed PMAG. Magazines in a Noveske, and the spares
+   you carry while you have one, become the pack's own PMAG: its mesh replaces the magazine's (the
+   game's ammo count, handling and reloads stay; the visible rounds are hidden, as a solid PMAG
+   shows none). The PMAG is hung at the inverse of where a seated magazine sits in the gun,
+   measured from the first one seen seated.
 6. **Loadouts and operations.** The game saves the guns you carry to `SaveGames\SavedGun_<slot>.sav`
    and rebuilds them at team-room start and in every operation. Those rebuilt guns are recognised
    and dressed too: a receiver that becomes a player's `PrimaryGun`/`SecondaryGun` is checked
@@ -68,6 +84,7 @@ developer); all trademarks belong to their owners.
   and compiled into the DLL, encrypted. What you may do with a build depends on your 3DMA license
   tier ([licenses](https://www.3dmilitaryassets.com/pages/licences)). For example, the Extended
   license requires the credit above in the product description.
+- Visual Studio 2022 and Blender (for the asset step).
 
 ## Asset protection
 
@@ -94,14 +111,13 @@ What no game can prevent, this one included: once the gun is rendered, GPU captu
 reverse engineer with a debugger can also find the key, because the game has to be able to
 decrypt the art to show it. This protection is aimed at file ripping, which is how assets are
 normally stolen from mods.
-- Visual Studio 2022 and Blender (for the asset step).
 
 ## Build and install
 
 ```bat
 git clone --recursive <this repo>
-set NOVESKE_FBX=<assembled rifle .fbx>
-set NOVESKE_TEXTURES=<...\Textures\PBR_Chainsaw_FDE_tx>
+set NOVESKE_FBX=<the pack's Mesh\Noveske_Chainsaw.fbx>
+set NOVESKE_TEXTURES=<the pack's Textures folder>
 blender --background --python tools\prepare_runtime.py
 build.bat install
 ```
@@ -118,28 +134,27 @@ GML checkout other than `external/gml`.
 |---|---|---|
 | `[Visuals] Enabled` | true | dress guns spawned from the Noveske entry |
 | `[Visuals] OffsetX / OffsetY / OffsetZ` | 2.154 / −0.466 / −0.909 | cm; + = muzzle / right / up |
-| `[Visuals] FitAttachments` | true | move the attachment rails and muzzle point onto the Noveske |
+| `[Visuals] FitAttachments` | true | move the attachment rails and muzzle point onto the Noveske, full handguard length |
+| `[Visuals] OwnMovingParts` | true | the Noveske's own bolt carrier, charging handle, dust cover, trigger, selector, bolt catch and magazine releases |
+| `[Visuals] OwnMagazines` | true | magazines in a Noveske, and the spares you carry with one, are the Noveske's PMAG |
 | `[Debug] Probe` | false | package-loading diagnostic |
 
 ## Tools
 
 | | |
 |---|---|
-| `tools/prepare_runtime.py` | source FBX + 4K PBR textures → `Assets\` (the build input that gets encrypted and embedded): OBJ with 6 material groups; per part Diffuse, Normal and ORM PNGs at 2K/1K, with linear data pre-encoded for the game's sRGB import |
+| `tools/prepare_runtime.py` | the pack's FBX + 4K PBR textures → `Assets\` (the build input that gets encrypted and embedded): the static rifle, the flash hider, each moving part (the bolt catch and releases cut out of the body mesh) and the PMAG as separate OBJs in one frame; per part Diffuse, Normal and ORM PNGs at 2K/1K, with linear data pre-encoded for the game's sRGB import |
 | `tools/pack` (`build\pack.exe`) | `Assets\` → `build\gen\payload.bin` + `payload_key.h`: the encrypted payload and this build's key (see [Asset protection](#asset-protection)); run by `build.bat` |
 | `tools/align` (`build\align.exe`) | `align <HK_416_279_v2.uexp> Assets\noveske.obj [x y z]`: computes the offset from the cooked HK416 mesh (extract it with retoc `to-legacy -f HK_416_279`), then prints the plugin's `kAttachPoints` table for that offset (or for `x y z`) |
-| `tests/NoveskeDev` | in-game test harness, never installed by `build.bat`. It loads the team room and presses the spawner's Noveske item through the game's own button handler. It then logs the receiver's attach points (`ATTACH`), mounts a foregrip, optic and suppressor through `AttachToServer` (`MOUNT`), and poses the gun in front of the headset camera for screenshots. It does the same for a stock HK416 to compare. `[Test] Scenario` in its `.cfg` picks the run: `station` (the above), `loadout` (saves the Noveske with the game's `SaveGunSetup` and rebuilds it with `LoadGunSetups`, as an operation does) or `operation` (loads the CargoShip operation and checks the rifle you're given) |
+| `tests/NoveskeDev` | in-game test harness, never installed by `build.bat`. It loads the team room and presses the spawner's Noveske item through the game's own button handler. It then logs the receiver's attach points (`ATTACH`), mounts a foregrip, optic and suppressor through `AttachToServer` (`MOUNT`), and poses the gun in front of the headset camera for screenshots. It does the same for a stock HK416 to compare. `[Test] Scenario` in its `.cfg` picks the run: `station` (the above), `loadout` (saves the Noveske with the game's `SaveGunSetup` and rebuilds it with `LoadGunSetups`, as an operation does) `operation` (loads the CargoShip operation and checks the rifle you're given) or `movables` (checks the moving parts ride their bones through a trigger pull and a pulled charging handle, the PMAG, the rail lengths and the flash hider under a suppressor). Screenshots are rendered by the game (`shot`), never taken from the desktop |
 
 ## Known limitations
 
-- The moving parts (bolt, charging handle, trigger, selector) and the magazine are the HK416's.
-- The rails keep the HK416's lengths (M-LOK x 15.5–30.5 cm), although the Noveske's handguard runs
-  about 3 cm further forward.
-- With a muzzle device or suppressor mounted, the Noveske's own flash hider stays; it sits inside
-  the suppressor, as the HK416's does.
 - Multiplayer (untested): the Noveske look is local. Only your own loadout gun is checked against
   your save slots, and other players get the HK416 donor from the game, so they see an HK416 with
-  the same attachments.
+  the same attachments and the game's PMAG.
+- Spare magazines turn into the Noveske's PMAG while you carry a Noveske; one picked up while you
+  don't stays the game's PMAG until it goes into a Noveske.
 - If you save the Noveske and quit within about a second, before the plugin re-saves the slot,
   the next launch repairs it (tested). If the plugin is removed, the slot loads as an HK416.
 - Runtime textures are uncompressed and have no mipmaps, so expect some shimmer at a distance.

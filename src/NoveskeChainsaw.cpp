@@ -13,8 +13,11 @@
 //    the station holding it as CurrentReceiver last had the Noveske entry picked in its spawner
 //    widget, that one actor gets a Noveske DynamicMeshComponent (built at runtime from the
 //    noveske.obj embedded in this DLL, textured with M_DefaultShader instances fed the embedded
-//    <Part>_{Diffuse,Normal,ORM}.png) and its HK416 mesh is hidden. Collision, physics, grips and
-//    sockets stay the HK416's; its attachment rails are moved onto the Noveske's.
+//    <Part>_{Diffuse,Normal,ORM}.png) and its HK416 mesh is hidden. Collision, physics and grips
+//    stay the HK416's; its attachment rails are moved onto the Noveske's, full handguard length.
+//    The Noveske's own moving parts ride the bones the game poses on the HK416's movables skeleton
+//    (bolt carrier, charging handle, dust cover, trigger, selector, bolt catch, mag releases), and
+//    magazines in a Noveske - and the carrier's spares - become the pack's PMAG.
 //    Guns the game rebuilds from your saved loadout (team room start, every operation) are
 //    recognised through their save slot and dressed the same way (see "loadouts" below).
 //
@@ -107,13 +110,31 @@ static void AddGun(Object gi) {
 
 // The game's weapon shader and its three texture parameters (dumped from HK_416_279_v2's MICs).
 static const char* kShader = "/Game/Art/Common/M_DefaultShader.M_DefaultShader";
-static const char* kParts[] = {"Body", "Handguard", "Stock", "Grip", "Muzzle", "Feer"};  // OBJ groups MI_<Part>
-static constexpr int kNumParts = 6;
+// Texture sets / material slots; OBJ `usemtl` group names in kGroups (the pack's own material names).
+static const char* kParts[] = {"Body", "Handguard", "Stock", "Grip", "Muzzle", "Feer", "PMag"};
+static const char* kGroups[] = {"MI_Body", "MI_Handguard", "MI_Stock", "MI_Grip", "MI_Muzzle", "MI_Feer", "MI_PMAG_556"};
+static constexpr int kNumParts = 7;
 
-static bool s_visualsEnabled = true;
+// The Noveske's own moving parts, each hung on the bone the game drives on the HK416's "movables"
+// skeleton (GunReceiver's TriggerBoneName, ChargingHandleBoneName, ... name the same bones).
+struct MovingPart { const char* asset; const char* bone; GUObject* mesh; };
+static MovingPart s_movingParts[] = {
+    {"noveske_bolt", "RootBoltCarrierGroup", nullptr},
+    {"noveske_charginghandle", "RootChargingHandle", nullptr},
+    {"noveske_dustcover", "RootDustCover", nullptr},
+    {"noveske_trigger", "RootTrigger", nullptr},
+    {"noveske_selector", "RootSelector", nullptr},
+    {"noveske_boltcatch", "RootBoltRelease", nullptr},  // these three are cut out of the pack's body mesh
+    {"noveske_magrelease", "RootMagRelease", nullptr},
+    {"noveske_magreleaseambi", "RootMagReleaseAmbi", nullptr},
+};
+
+static bool s_visualsEnabled = true, s_ownMovingParts = true, s_ownMagazines = true;
 static float s_offset[3] = {0, 0, 0};  // cm, added to the mesh after the axis conversion
-static GUObject* s_mesh = nullptr;     // runtime UDynamicMesh (Geometry Scripting)
-static GUObject* s_mids[kNumParts] = {};  // one M_DefaultShader instance per part
+static GUObject* s_mesh = nullptr;     // runtime UDynamicMesh (Geometry Scripting): body, handguard, stock, grip, FEER
+static GUObject* s_muzzleMesh = nullptr;  // flash hider (hidden while a muzzle device is mounted)
+static GUObject* s_pmagMesh = nullptr;    // the pack's PMAG, in gun space as if fully inserted
+static GUObject* s_mids[kNumParts] = {};  // one M_DefaultShader instance per texture set
 static bool s_assetsTried = false;
 static GUClass* s_receiverClass = nullptr;
 static std::map<GUObject*, GUObject*> s_selected;  // spawner widget -> item last picked in it
@@ -124,13 +145,13 @@ static std::vector<GUObject*> s_dressed;  // receivers already given the Noveske
 
 // Decrypts one asset from the payload into `out`. Callers wipe it as soon as the engine has it, so
 // at most one asset exists in plain form, and only for that moment.
-static bool Unpack(const char* name, std::vector<uint8_t>& out) {
+static bool Unpack(const char* name, std::vector<uint8_t>& out, bool optional = false) {
     static Blob blob = Resource("DATA");
     uint8_t key[32];
     for (int i = 0; i < 32; i++) key[i] = kPayloadKeyA[i] ^ kPayloadKeyB[i];
     bool ok = blob && payload::Extract(blob.data, blob.size, key, name, out);
     SecureZeroMemory(key, sizeof key);
-    if (!ok) Error("embedded asset '{}' is missing or damaged", name);
+    if (!ok && !optional) Error("embedded asset '{}' is missing or damaged", name);
     return ok;
 }
 
@@ -144,10 +165,8 @@ static bool BuildVisualAssets() {
     Object shader = LoadObject(kShader);
     if (!shader) { Error("weapon shader {} not found", kShader); return false; }
 
-    // Mesh and textures come from the encrypted payload inside this DLL, one at a time.
+    // Meshes and textures come from the encrypted payload inside this DLL, one at a time.
     std::vector<uint8_t> buf;
-    std::string names[kNumParts];
-    const char* namePtrs[kNumParts];
     for (int i = 0; i < kNumParts; i++) {
         s_mids[i] = API->CreateMaterialInstance(shader.ptr);
         if (!s_mids[i]) { Error("could not create a material instance for {}", kParts[i]); return false; }
@@ -158,8 +177,6 @@ static bool BuildVisualAssets() {
             if (!tex || !API->SetMaterialTexture(s_mids[i], param, tex))
                 Warn("{}: texture {} missing - that channel keeps the shader default", kParts[i], param);
         }
-        names[i] = std::string("MI_") + kParts[i];  // OBJ usemtl group -> material ID i
-        namePtrs[i] = names[i].c_str();
     }
 
     GML_MeshImport o{};
@@ -168,13 +185,92 @@ static bool BuildVisualAssets() {
     std::memcpy(o.offset, s_offset, sizeof s_offset);
     o.flipWinding = -1;
     o.materialCount = kNumParts;
-    o.materialNames = namePtrs;
+    o.materialNames = kGroups;  // OBJ usemtl group -> material ID i
     o.materials = s_mids;
-    s_mesh = Unpack("noveske", buf) ? API->ImportDynamicMeshFromMemory(buf.data(), buf.size(), "noveske", &o) : nullptr;
-    payload::Wipe(buf);
-    if (!s_mesh) Error("could not build the Noveske mesh");
-    else Log("Noveske visuals ready: {}", Object(s_mesh).FullName());
+    auto load = [&](const char* name, bool optional = false) -> GUObject* {
+        if (!Unpack(name, buf, optional)) return nullptr;
+        GUObject* m = API->ImportDynamicMeshFromMemory(buf.data(), buf.size(), name, &o);
+        payload::Wipe(buf);
+        if (!m) Error("could not build the Noveske mesh '{}'", name);
+        return m;
+    };
+    s_mesh = load("noveske");
+    s_muzzleMesh = load("noveske_muzzle");
+    s_pmagMesh = load("noveske_pmag");
+    for (auto& p : s_movingParts) p.mesh = load(p.asset, true);  // a part the pack lacks stays the HK416's bone, unseen
+    if (s_mesh) Log("Noveske visuals ready: {}", Object(s_mesh).FullName());
     return s_mesh != nullptr;
+}
+
+// ------------------------------------------------------------------ transforms (raw FTransform bytes)
+
+using Xf = std::vector<uint8_t>;
+static size_t XfSize() {
+    static size_t size = 0;
+    if (!size) {
+        GML_PropInfo ri;
+        API->GetPropertyInfo(API->FindProperty((GUStruct*)API->FindFunction(Lib("KismetMathLibrary").Struct(), "MakeTransform"), "ReturnValue"), &ri);
+        size = ri.size;
+    }
+    return size;
+}
+static Xf TakeXf(Params& p, const char* name = "ReturnValue") {
+    auto* s = (uint8_t*)p.Ptr(name);
+    return Xf(s, s + XfSize());
+}
+static void PutXf(Params& p, const char* name, const Xf& x) { std::memcpy(p.Ptr(name), x.data(), x.size()); }
+static Xf XfCall(const char* fn, std::initializer_list<std::pair<const char*, const Xf*>> args) {
+    Params p(Lib("KismetMathLibrary"), fn);
+    for (auto& [n, x] : args) PutXf(p, n, *x);
+    p.Call();
+    return TakeXf(p);
+}
+static Xf Compose(const Xf& a, const Xf& b) { return XfCall("ComposeTransforms", {{"A", &a}, {"B", &b}}); }  // a then b
+static Xf Invert(const Xf& t) { return XfCall("InvertTransform", {{"T", &t}}); }
+static Xf RelativeTo(const Xf& a, const Xf& to) { return XfCall("MakeRelativeTransform", {{"A", &a}, {"RelativeTo", &to}}); }
+static Xf WorldXf(Object obj) {  // actor or scene component
+    Params p(obj, obj.IsA("Actor") ? "GetTransform" : "K2_GetComponentToWorld");
+    p.Call();
+    return TakeXf(p);
+}
+static void SetRelativeXf(Object comp, const Xf& x) {
+    Params p(comp, "K2_SetRelativeTransform");
+    PutXf(p, "NewTransform", x);
+    p.Set("bSweep", false).Set("bTeleport", true).Call();
+}
+static void AttachTo(Object comp, Object parent, const char* socket) {
+    Params at(comp, "K2_AttachToComponent");
+    at.SetObj("Parent", parent).Set("SocketName", socket ? API->MakeName(socket) : uint64_t(0))
+        .Set("LocationRule", (uint8_t)2).Set("RotationRule", (uint8_t)2).Set("ScaleRule", (uint8_t)2)  // SnapToTarget
+        .Set("bWeldSimulatedBodies", false).Call();
+}
+
+// A bone's reference-pose transform in component space: its local ref transforms composed up the
+// parent chain. The rest pose, whatever the gun is doing right now (bolt locked back, trigger held).
+static Xf RefPoseComponent(Object skel, const char* bone) {
+    Xf acc;
+    uint64_t name = API->MakeName(bone);
+    for (int guard = 0; guard < 64 && name; guard++) {
+        Params bi(skel, "GetBoneIndex");
+        *(uint64_t*)bi.Ptr("BoneName") = name;
+        bi.Call();
+        int idx = bi.Return<int32_t>();
+        if (idx < 0) break;
+        Params rp(skel, "GetRefPoseTransform");
+        rp.Set("BoneIndex", (int32_t)idx).Call();
+        Xf local = TakeXf(rp);
+        acc = acc.empty() ? local : Compose(acc, local);  // child first, then its parent
+        Params pb(skel, "GetParentBone");
+        *(uint64_t*)pb.Ptr("BoneName") = name;
+        pb.Call();
+        name = pb.Return<uint64_t>();
+    }
+    return acc;
+}
+
+static void HideComponent(Object c) {
+    Params v(c, "SetVisibility");
+    v.Set("bNewVisibility", false).Set("bPropagateToChildren", false).Call();  // attached children stay visible
 }
 
 // Where attachments go. The HK416 receiver's attachment splines (Picatinny rails, M-LOK faces) and
@@ -275,6 +371,29 @@ static int SnapMountedAttachments(Object gun, ActorFrame& frame) {
     return snapped;
 }
 
+// The Noveske's handguard runs to x = 36.7 cm where the HK416's ends near 33.3; its rails end this
+// far short of the handguard's end, as the HK416's do (actor space, cm, default offset).
+static const struct { const char* name; double endX; } kRailEnds[] = {
+    {"ReceiverAttachmentSplineHG12", 33.7}, {"ReceiverAttachmentSplineHG45", 33.5}, {"ReceiverAttachmentSplineHG9", 33.5},
+    {"ReceiverAttachmentSplineHG135", 33.5}, {"ReceiverAttachmentSplineHG6", 33.5}, {"ReceiverAttachmentSplineHG-135", 33.5},
+    {"ReceiverAttachmentSplineHG-90", 33.5}, {"ReceiverAttachmentSplineHG-45", 33.5},
+};
+
+// Stretch a two-point rail spline so it ends at actor x = endX (its start stays).
+static void ExtendRail(Object spline, const AttachPoint& start, double endX) {
+    Params n(spline, "GetNumberOfSplinePoints");
+    n.Call();
+    if (n.Return<int32_t>() != 2) return;
+    Params p1(spline, "GetLocationAtSplinePoint");
+    p1.Set("PointIndex", (int32_t)1).Set("CoordinateSpace", (uint8_t)0).Call();  // Local
+    Vec3 v = p1.Return<Vec3>();
+    double len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z), want = endX - AttachTarget(start).x;
+    if (len < 1 || want <= len) return;
+    Vec3 nv{v.x * want / len, v.y * want / len, v.z * want / len};
+    Params s(spline, "SetLocationAtSplinePoint");
+    s.Set("PointIndex", (int32_t)1).Set("InLocation", nv).Set("CoordinateSpace", (uint8_t)0).Set("bUpdateSpline", true).Call();
+}
+
 static void FitAttachPoints(Object actor) {
     ActorFrame frame(actor);
     Params gc(actor, "K2_GetComponentsByClass");
@@ -286,6 +405,8 @@ static void FitAttachPoints(Object actor) {
         if (const AttachPoint* p = FindAttachPoint(c.Name())) {
             Params sw(c, "K2_SetWorldLocation");
             sw.Set("NewLocation", frame.ToWorld(AttachTarget(*p))).Set("bSweep", false).Set("bTeleport", true).Call();
+            for (auto& r : kRailEnds)
+                if (c.Name() == r.name) ExtendRail(c, *p, r.endX + s_offset[0] - kDefaultOffset[0]);
             moved++;
         }
     }
@@ -295,6 +416,90 @@ static void FitAttachPoints(Object actor) {
     if (int n = SnapMountedAttachments(actor, frame)) Log("{}: {} mounted attachment(s) moved onto the Noveske's rails", actor.Name(), n);
 }
 
+// ------------------------------------------------------------------ magazines
+//
+// The HK416 takes the game's windowed PMAG (Magazine_STANAG_PMAG_30_Window). A magazine that goes
+// into a Noveske - and the spare ones you carry while you have one - get the pack's own PMAG: its
+// mesh replaces the magazine's (the game's rounds, handling and ammo stay). The PMAG geometry is in
+// gun space as if fully inserted, so it hangs on the magazine at the inverse of where a fully inserted
+// magazine sits in the gun (measured once from the first inserted magazine).
+
+static std::vector<GUObject*> s_dressedMags;
+static Xf s_magInGun;  // magazine actor transform relative to the gun, fully inserted
+
+static bool IsDressedMag(GUObject* m) { return std::find(s_dressedMags.begin(), s_dressedMags.end(), m) != s_dressedMags.end(); }
+
+// The game draws the rounds (instanced meshes) for its windowed PMAG; they follow that magazine's curve
+// and would poke through the pack's solid PMAG, which shows none - so they stay hidden.
+static void HideRounds(Object mag) {
+    Params gc(mag, "K2_GetComponentsByClass");
+    gc.Set("ComponentClass", FindClass("InstancedStaticMeshComponent")).Call();
+    auto* arr = (GML_TArray*)gc.Ptr("ReturnValue");
+    for (int i = 0; arr && i < arr->Num; i++) {
+        Object c(((GUObject**)arr->Data)[i]);
+        if (c.GetBool("bVisible")) HideComponent(c);
+    }
+}
+
+static void DressMagazine(Object mag, Object insertedIn) {
+    if (!mag || !s_pmagMesh || IsDressedMag(mag.ptr)) return;
+    if (insertedIn && s_magInGun.empty()) {
+        // The reference comes from a magazine seated in the gun (its CurrentMagazine) that sits in the
+        // same place on two checks a quarter second apart - not one still sliding in or out.
+        static Xf candidate;
+        if (insertedIn.GetObj("CurrentMagazine").ptr != mag.ptr) return;
+        Xf now = RelativeTo(WorldXf(mag), WorldXf(insertedIn));
+        bool steady = false;
+        if (!candidate.empty()) {
+            Params eq(Lib("KismetMathLibrary"), "NearlyEqual_TransformTransform");
+            PutXf(eq, "A", candidate);
+            PutXf(eq, "B", now);
+            eq.Set("LocationTolerance", 0.05f).Set("RotationTolerance", 0.2f).Set("Scale3DTolerance", 0.001f).Call();
+            steady = eq.Return<bool>();
+        }
+        candidate = now;
+        if (!steady) return;
+        s_magInGun = now;
+        Log("magazine reference taken from {} seated in {}", mag.Name(), insertedIn.Name());
+    }
+    if (s_magInGun.empty()) return;  // no reference yet: dressed once one has been seen seated
+    Object root = mag.GetObj("RootComponent");
+    Object comp = API->AddDynamicMeshComponent(mag.ptr, s_pmagMesh, s_mids, kNumParts);
+    if (!root || !comp) return;
+    SetRelativeXf(comp, Invert(s_magInGun));
+    HideComponent(root);
+    HideRounds(mag);
+    s_dressedMags.push_back(mag.ptr);
+    Log("magazine {} is now the Noveske's PMAG", mag.Name());
+}
+
+// ------------------------------------------------------------------ dressing
+
+struct DressedGun { GUObject* gun; GUObject* muzzle; };
+static std::vector<DressedGun> s_dressedGuns;  // for the flash hider and magazine checks
+
+static void HangMovingParts(Object actor) {
+    Object mov = actor.GetObj("Movables");  // HK416 moving parts: a PoseableMesh the gun code poses by bone name
+    if (!mov) { Warn("{} has no Movables component - keeping the HK416's moving parts", actor.Name()); return; }
+    Xf movInActor = RelativeTo(WorldXf(mov), WorldXf(actor));
+    int hung = 0;
+    for (auto& p : s_movingParts) {
+        if (!p.mesh) continue;
+        Xf rest = RefPoseComponent(mov, p.bone);  // bone at rest, component space
+        if (rest.empty()) { Warn("bone {} not found on {}", p.bone, actor.Name()); continue; }
+        Object comp = API->AddDynamicMeshComponent(actor.ptr, p.mesh, s_mids, kNumParts);
+        if (!comp) continue;
+        // The part's vertices are in actor space; on the bone it must sit at the inverse of the bone's rest pose.
+        AttachTo(comp, mov, p.bone);
+        SetRelativeXf(comp, Invert(Compose(rest, movInActor)));
+        hung++;
+    }
+    // Stop drawing the HK416's parts but keep the bones posed: the Noveske's parts ride on them.
+    mov.Set("VisibilityBasedAnimTickOption", (uint8_t)0);  // AlwaysTickPoseAndRefreshBones
+    HideComponent(mov);
+    Log("{}: {} Noveske moving parts on the gun's bones", actor.Name(), hung);
+}
+
 static void DressAsNoveske(Object actor) {
     if (std::find(s_dressed.begin(), s_dressed.end(), actor.ptr) != s_dressed.end()) return;
     if (!BuildVisualAssets()) return;
@@ -302,11 +507,77 @@ static void DressAsNoveske(Object actor) {
     if (!root) { Error("{} has no StaticMeshComponent", actor.FullName()); return; }
     Object comp = API->AddDynamicMeshComponent(actor.ptr, s_mesh, s_mids, kNumParts);
     if (!comp) { Error("could not add the Noveske mesh to {}", actor.FullName()); return; }
-    Params hide(root, "SetVisibility");
-    hide.Set("bNewVisibility", false).Set("bPropagateToChildren", false).Call();  // children stay visible
+    Object muzzle = s_muzzleMesh ? Object(API->AddDynamicMeshComponent(actor.ptr, s_muzzleMesh, s_mids, kNumParts)) : Object();
+    HideComponent(root);
+    if (s_ownMovingParts) HangMovingParts(actor);
     if (s_fitAttachments) FitAttachPoints(actor);
     s_dressed.push_back(actor.ptr);
+    s_dressedGuns.push_back({actor.ptr, muzzle.ptr});
+    if (s_ownMagazines) DressMagazine(actor.GetObj("CurrentMagazine"), actor);
     Log("*** {} dressed as Noveske Chainsaw{} ***", actor.Name(), s_fitAttachments ? ", attach points on its rails" : "");
+}
+
+// Topmost actor this one is attached to (a magazine in a pouch on a player -> the player).
+static GUObject* AttachRoot(Object a) {
+    for (int guard = 0; guard < 16 && a; guard++) {
+        Params p(a, "GetAttachParentActor");
+        p.Call();
+        Object up = p.Return<GUObject*>();
+        if (!up) break;
+        a = up;
+    }
+    return a.ptr;
+}
+
+// Every quarter second: the magazine in each Noveske, the local player's spare magazines while they
+// have a Noveske, and each Noveske's flash hider (hidden while a muzzle device replaces it).
+static void WatchDressedGuns() {
+    static ULONGLONG next = 0;
+    if (s_dressedGuns.empty() || GetTickCount64() < next) return;
+    next = GetTickCount64() + 250;
+    Object pawn;
+    {
+        Params p(Lib("GameplayStatics"), "GetPlayerPawn");
+        p.SetObj("WorldContextObject", Object(API->WorldContext())).Set("PlayerIndex", (int32_t)0).Call();
+        pawn = p.Return<GUObject*>();
+    }
+    bool playerHasNoveske = false;
+    GML_TArray* accepted = nullptr;
+    for (size_t i = 0; i < s_dressedGuns.size();) {
+        Object gun(s_dressedGuns[i].gun);
+        if (!gun || !API->IsValid(gun.ptr)) { s_dressedGuns.erase(s_dressedGuns.begin() + i); continue; }
+        if (s_ownMagazines) {
+            DressMagazine(gun.GetObj("CurrentMagazine"), gun);
+            if (pawn && AttachRoot(gun) == pawn.ptr) playerHasNoveske = true;
+            accepted = (GML_TArray*)gun.PropPtr("AcceptedMagazines");
+        }
+        if (Object muzzle = s_dressedGuns[i].muzzle; muzzle && API->IsValid(muzzle.ptr)) {
+            bool device = false;
+            Params ga(gun, "GetAttachedActors");
+            ga.Set("bResetArray", true).Set("bRecursivelyIncludeAttachedActors", false).Call();
+            auto* arr = (GML_TArray*)ga.Ptr("OutActors");
+            for (int k = 0; arr && k < arr->Num && !device; k++) {
+                Object att(((GUObject**)arr->Data)[k]);
+                char tag[64] = "";
+                if (att.IsA("GunAttachment")) API->NameToString(att.Get<uint64_t>("AttachPointTag"), tag, sizeof tag);
+                device = !strcmp(tag, "MuzzleAttachLocation") && att.GetBool("bAttached");
+            }
+            Params v(muzzle, "SetVisibility");
+            v.Set("bNewVisibility", !device).Set("bPropagateToChildren", false).Call();
+        }
+        i++;
+    }
+    for (size_t i = 0; i < s_dressedMags.size();) {  // keep their rounds hidden if the game re-shows them
+        if (!API->IsValid(s_dressedMags[i])) { s_dressedMags.erase(s_dressedMags.begin() + i); continue; }
+        HideRounds(s_dressedMags[i++]);
+    }
+    if (playerHasNoveske && accepted && pawn) {
+        for (int k = 0; k < accepted->Num; k++) {
+            Object cls(((GUObject**)accepted->Data)[k]);
+            for (auto& mag : FindAllOf(cls.Name().c_str()))
+                if (!IsDressedMag(mag.ptr) && AttachRoot(mag) == pawn.ptr) DressMagazine(mag, {});
+        }
+    }
 }
 
 // ------------------------------------------------------------------ loadouts (team room, operations)
@@ -547,9 +818,16 @@ static void InstallVisuals() {
     On(GML_EVENT_TICK, [](void*) {
         ResolvePending();
         WatchLoadouts();
+        WatchDressedGuns();
     });
-    // Build the mesh and textures while the first level loads, not when the gun is first spawned.
-    On(GML_EVENT_WORLD_BEGIN_PLAY, [](void*) { BuildVisualAssets(); });
+    // Build the mesh and textures while the first level loads, not when the gun is first spawned. A new
+    // level's actors can reuse the old ones' addresses, so forget what was dressed.
+    On(GML_EVENT_WORLD_BEGIN_PLAY, [](void*) {
+        BuildVisualAssets();
+        s_dressed.clear();
+        s_dressedGuns.clear();
+        s_dressedMags.clear();
+    });
 }
 
 // ------------------------------------------------------------------ probe (diagnostic)
@@ -647,8 +925,13 @@ GML_AWAKE() {
     s_offset[1] = Config.Bind("Visuals", "OffsetY", -0.466f, "cm, + = to the gun's right").Value();
     s_offset[2] = Config.Bind("Visuals", "OffsetZ", -0.909f, "cm, + = up").Value();
     s_fitAttachments = Config.Bind("Visuals", "FitAttachments", true,
-        "Move the rails, M-LOK slots and muzzle point that attachments snap to onto the Noveske's own\n"
-        "(false = where they are on the HK416).").Value();
+        "Move the rails, M-LOK slots and muzzle point that attachments snap to onto the Noveske's own,\n"
+        "full handguard length (false = where they are on the HK416).").Value();
+    s_ownMovingParts = Config.Bind("Visuals", "OwnMovingParts", true,
+        "The Noveske's own bolt carrier, charging handle, dust cover, trigger and selector, moved by the game\n"
+        "(false = the HK416's).").Value();
+    s_ownMagazines = Config.Bind("Visuals", "OwnMagazines", true,
+        "Magazines in a Noveske, and the spares you carry while you have one, are the Noveske's own PMAG.").Value();
     if (s_visualsEnabled) InstallVisuals();
     Log("loaded - adds '{}' to the Assault Rifle spawner; visuals {}", kDisplayName, s_visualsEnabled ? "on" : "off");
     return 0;
