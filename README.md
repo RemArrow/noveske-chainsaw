@@ -58,6 +58,14 @@ developer); all trademarks belong to their owners.
    (`VisibilityBasedAnimTickOption` = always), so racking, firing, trigger pull, selector and bolt
    catch all move the Noveske's parts. The pack has no separate bolt catch or releases; the asset
    script cuts them out of the body mesh.
+
+   The **dust cover** is the exception. The Noveske's turns on its own hinge pin, 0.3 cm above
+   and 0.1 cm inside the HK416's, and lies a half turn from open on the receiver's 22.5° slope
+   when shut. The game re-poses the HK416's bone at the HK416's pin every frame. So the cover hangs
+   on the movables component instead, and each frame it is turned as the bone is turned, but about
+   the Noveske's pin. The gun also gets the Noveske's open and shut angles (0 and −179.5°), just short
+   of a half turn, so the game's shortest-way swing takes the cover outward and not through the
+   receiver.
 8. **Magazines.** The HK416 takes the game's windowed PMAG. Magazines in a Noveske, and the spares
    you carry while you have one, become the pack's own PMAG: its mesh replaces the magazine's (the
    game's ammo count, handling and reloads stay; the visible rounds are hidden, as a solid PMAG

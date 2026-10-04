@@ -478,6 +478,95 @@ static void DressMagazine(Object mag, Object insertedIn) {
 struct DressedGun { GUObject* gun; GUObject* muzzle; };
 static std::vector<DressedGun> s_dressedGuns;  // for the flash hider and magazine checks
 
+// The pack's dust cover turns on its own hinge pin, 0.3 cm above and 0.1 cm inside the HK416's, and
+// shuts a half turn from where the pack models it (open, hanging below the port), lying on the
+// receiver's 22.5-degree slope around the port. Ridden on the HK416's bone it shut 0.75 cm low, and
+// the game swings a cover the short way round between its angles, which with the HK416's (-177, 4)
+// takes this one through the receiver. So the gun gets angles just short of a half turn apart, which
+// swing it outward, and the cover turns as the bone does but about the Noveske's pin: the game
+// re-poses the bone at the HK416's pin every frame, so the cover is set from the bone each frame
+// instead of hanging on it.
+static const char* kDustCoverBone = "RootDustCover";
+static const double kDustCoverPin[2] = {1.615, 2.370};  // actor y, z (cm) at the default offset; the pin runs along the bore
+static const float kDustCoverShut = -179.5f, kDustCoverOpen = 0.0f;  // the Rifle's angles: bone roll from its rest pose
+
+struct Rot3 { double pitch, yaw, roll; };
+static Vec3 XfPoint(const char* fn, const Xf& t, Vec3 v) {  // TransformLocation / InverseTransformLocation
+    Params p(Lib("KismetMathLibrary"), fn);
+    PutXf(p, "T", t);
+    p.Set("Location", v).Call();
+    return p.Return<Vec3>();
+}
+static Xf MovedTo(const Xf& t, Vec3 at) {  // t with its location replaced
+    Params br(Lib("KismetMathLibrary"), "BreakTransform");
+    PutXf(br, "InTransform", t);
+    br.Call();
+    Params mk(Lib("KismetMathLibrary"), "MakeTransform");
+    mk.Set("Location", at).Set("Rotation", br.Get<Rot3>("Rotation")).Set("Scale", br.Get<Vec3>("Scale")).Call();
+    return TakeXf(mk);
+}
+
+struct DustCover {
+    GUObject* part;  // the Noveske's cover, on the Movables component
+    GUObject* mov;
+    Xf base;         // actor space -> the bone's local space at rest, about the Noveske's pin
+    Vec3 pin;        // component space
+    Xf last;         // the bone's transform the cover was last set from
+};
+static std::vector<DustCover> s_dustCovers;
+
+static void PoseDustCover(DustCover& c) {
+    static uint64_t bone = API->MakeName(kDustCoverBone);
+    Params bt(Object(c.mov), "GetBoneTransformByName");
+    *(uint64_t*)bt.Ptr("BoneName") = bone;
+    bt.Set("BoneSpace", (uint8_t)1).Call();  // component space
+    Xf now = TakeXf(bt);
+    if (now == c.last) return;
+    c.last = now;
+    SetRelativeXf(Object(c.part), Compose(c.base, MovedTo(now, c.pin)));
+}
+
+static void PoseDustCovers() {  // every frame
+    for (size_t i = 0; i < s_dustCovers.size();) {
+        auto& c = s_dustCovers[i];
+        if (!API->IsValid(c.part) || !API->IsValid(c.mov)) { s_dustCovers.erase(s_dustCovers.begin() + i); continue; }
+        PoseDustCover(c);
+        i++;
+    }
+}
+
+// Gives the gun the Noveske's dust cover angles and hangs `part` on the Movables component, posed
+// each frame about the Noveske's pin.
+static void FitDustCover(Object gun, Object mov, Object part, const Xf& rest, const Xf& movInActor) {
+    Params br(Lib("KismetMathLibrary"), "BreakTransform");
+    PutXf(br, "InTransform", rest);
+    br.Call();
+    Vec3 pin = XfPoint("TransformLocation", movInActor, br.Get<Vec3>("Location"));  // the HK416's, actor space
+    pin.y = kDustCoverPin[0] + s_offset[1] - kDefaultOffset[1];
+    pin.z = kDustCoverPin[1] + s_offset[2] - kDefaultOffset[2];
+    DustCover c{part.ptr, mov.ptr, {}, XfPoint("InverseTransformLocation", movInActor, pin), {}};
+    c.base = Compose(Invert(movInActor), Invert(MovedTo(rest, c.pin)));
+
+    // The cover goes to the Noveske's angle for whichever state it is in now (the game's angle can be
+    // a turn away from its settings, e.g. -356 for open at 4).
+    auto apart = [](float a, float b) { float d = std::fmod(std::fabs(a - b), 360.0f); return d < 180.0f ? d : 360.0f - d; };
+    float cur = gun.Get<float>("CurrentDustCoverAngle");
+    float now = apart(cur, gun.Get<float>("DustCoverOpenRotation")) < apart(cur, gun.Get<float>("DustCoverClosedRotation"))
+                    ? kDustCoverOpen : kDustCoverShut;
+    gun.Set("DustCoverClosedRotation", kDustCoverShut);
+    gun.Set("DustCoverOpenRotation", kDustCoverOpen);
+    gun.Set("CurrentDustCoverAngle", now);
+    Rot3 r = br.Get<Rot3>("Rotation");
+    r.roll += now;
+    Params sr(mov, "SetBoneRotationByName");
+    *(uint64_t*)sr.Ptr("BoneName") = API->MakeName(kDustCoverBone);
+    sr.Set("InRotation", r).Set("BoneSpace", (uint8_t)1).Call();
+
+    AttachTo(part, mov, nullptr);
+    PoseDustCover(c);
+    s_dustCovers.push_back(std::move(c));
+}
+
 static void HangMovingParts(Object actor) {
     Object mov = actor.GetObj("Movables");  // HK416 moving parts: a PoseableMesh the gun code poses by bone name
     if (!mov) { Warn("{} has no Movables component - keeping the HK416's moving parts", actor.Name()); return; }
@@ -489,6 +578,11 @@ static void HangMovingParts(Object actor) {
         if (rest.empty()) { Warn("bone {} not found on {}", p.bone, actor.Name()); continue; }
         Object comp = API->AddDynamicMeshComponent(actor.ptr, p.mesh, s_mids, kNumParts);
         if (!comp) continue;
+        if (!strcmp(p.bone, kDustCoverBone)) {
+            FitDustCover(actor, mov, comp, rest, movInActor);
+            hung++;
+            continue;
+        }
         // The part's vertices are in actor space; on the bone it must sit at the inverse of the bone's rest pose.
         AttachTo(comp, mov, p.bone);
         SetRelativeXf(comp, Invert(Compose(rest, movInActor)));
@@ -819,6 +913,7 @@ static void InstallVisuals() {
         ResolvePending();
         WatchLoadouts();
         WatchDressedGuns();
+        PoseDustCovers();
     });
     // Build the mesh and textures while the first level loads, not when the gun is first spawned. A new
     // level's actors can reuse the old ones' addresses, so forget what was dressed.
@@ -827,6 +922,7 @@ static void InstallVisuals() {
         s_dressed.clear();
         s_dressedGuns.clear();
         s_dressedMags.clear();
+        s_dustCovers.clear();
     });
 }
 
