@@ -137,11 +137,9 @@ static GUObject* s_pmagMesh = nullptr;    // the pack's PMAG, in gun space as if
 static GUObject* s_mids[kNumParts] = {};  // one M_DefaultShader instance per texture set
 static bool s_assetsTried = false;
 static GUClass* s_receiverClass = nullptr;
-static std::map<GUObject*, GUObject*> s_selected;  // spawner widget -> item last picked in it
 
 struct Pending { GUObject* actor; ULONGLONG since; };
 static std::vector<Pending> s_pending;
-static std::vector<GUObject*> s_dressed;  // receivers already given the Noveske look
 
 // Decrypts one asset from the payload into `out`. Callers wipe it as soon as the engine has it, so
 // at most one asset exists in plain form, and only for that moment.
@@ -427,7 +425,17 @@ static void FitAttachPoints(Object actor) {
 static std::vector<GUObject*> s_dressedMags;
 static Xf s_magInGun;  // magazine actor transform relative to the gun, fully inserted
 
-static bool IsDressedMag(GUObject* m) { return std::find(s_dressedMags.begin(), s_dressedMags.end(), m) != s_dressedMags.end(); }
+// Read off the actor itself, not a list: only this plugin gives an HK416 receiver or its magazine
+// DynamicMeshComponents (the Noveske's meshes). Lists can go stale: in someone else's game no level-start
+// event says when to forget them, and a new level's actors can reuse old addresses.
+static bool IsDressed(Object actor) {
+    Params gc(actor, "K2_GetComponentsByClass");
+    gc.Set("ComponentClass", FindClass("DynamicMeshComponent")).Call();
+    auto* arr = (GML_TArray*)gc.Ptr("ReturnValue");
+    return arr && arr->Num > 0;
+}
+
+static bool IsDressedMag(GUObject* m) { return IsDressed(Object(m)); }
 
 // The game draws the rounds (instanced meshes) for its windowed PMAG; they follow that magazine's curve
 // and would poke through the pack's solid PMAG, which shows none - so they stay hidden.
@@ -595,7 +603,7 @@ static void HangMovingParts(Object actor) {
 }
 
 static void DressAsNoveske(Object actor) {
-    if (std::find(s_dressed.begin(), s_dressed.end(), actor.ptr) != s_dressed.end()) return;
+    if (IsDressed(actor)) return;
     if (!BuildVisualAssets()) return;
     Object root = actor.GetObj("StaticMeshComponent");  // the HK416 mesh; also collision + physics
     if (!root) { Error("{} has no StaticMeshComponent", actor.FullName()); return; }
@@ -605,7 +613,6 @@ static void DressAsNoveske(Object actor) {
     HideComponent(root);
     if (s_ownMovingParts) HangMovingParts(actor);
     if (s_fitAttachments) FitAttachPoints(actor);
-    s_dressed.push_back(actor.ptr);
     s_dressedGuns.push_back({actor.ptr, muzzle.ptr});
     if (s_ownMagazines) DressMagazine(actor.GetObj("CurrentMagazine"), actor);
     Log("*** {} dressed as Noveske Chainsaw{} ***", actor.Name(), s_fitAttachments ? ", attach points on its rails" : "");
@@ -621,6 +628,76 @@ static GUObject* AttachRoot(Object a) {
         a = up;
     }
     return a.ptr;
+}
+
+// ------------------------------------------------------------------ multiplayer
+//
+// Each machine dresses guns itself, and only the one whose player picked the Noveske (or loaded it from
+// a save slot) knows the HK416 it got is one. It tells the others through the receiver's own
+// ColorComponent: its ColorOption is an FName the game replicates to every player and keeps in a saved
+// loadout, and on a dressed gun the receiver mesh that colour would paint is hidden. The plugin sets it
+// to kMarker with the game's own colour RPC, and any machine with the plugin that sees an HK416 receiver
+// with that colour - when it replicates in, or later through OnRep_ColorOption - dresses it. A machine
+// without the plugin ignores the unknown colour and shows the HK416.
+
+static constexpr char kMarker[] = "NoveskeChainsaw";
+static const char* kSelectHook =
+    "WB_GunCustomization_C:BndEvt__WB_GunCustomization_WB_Database_K2Node_ComponentBoundEvent_34_OnItemSelected__DelegateSignature";
+static std::map<GUObject*, GUObject*> s_picks;  // gun station -> gun last picked at it on this machine
+
+static bool HasAuthority(Object actor) {
+    Params p(actor, "HasAuthority");
+    p.Call();
+    return p.Return<bool>();
+}
+
+static std::string ColorOf(Object receiver) {
+    Object cc = receiver ? receiver.GetObj("ColorComponent") : Object();
+    char b[128] = "";
+    if (cc) API->NameToString(cc.Get<uint64_t>("ColorOption"), b, sizeof b);
+    return b;
+}
+
+static bool IsMarked(Object receiver) {
+    return receiver.Class() == s_receiverClass && _stricmp(ColorOf(receiver).c_str(), kMarker) == 0;
+}
+
+// This machine's player owns the actor (it was spawned for them, or they hold it): the server takes
+// RPCs on it from here.
+static bool LocallyOwned(Object actor) {
+    Object o = actor;
+    for (int guard = 0; guard < 4 && o; guard++) {
+        if (o.IsA("Pawn")) {
+            Params lc(o, "IsLocallyControlled");
+            lc.Call();
+            return lc.Return<bool>();
+        }
+        if (o.IsA("PlayerController")) {
+            Params lc(o, "IsLocalController");
+            lc.Call();
+            return lc.Return<bool>();
+        }
+        Params go(o, "GetOwner");
+        go.Call();
+        o = go.Return<GUObject*>();
+    }
+    return false;
+}
+
+// Names the gun a Noveske for every player: on the server the colour applies at once and replicates;
+// from the client that owns the gun it goes to the server first. At most once a second per gun.
+static void Mark(Object receiver) {
+    static std::map<GUObject*, ULONGLONG> asked;
+    Object cc = receiver.GetObj("ColorComponent");
+    if (!cc || IsMarked(receiver)) return;
+    bool authority = HasAuthority(receiver);
+    if (!authority && !LocallyOwned(receiver)) return;  // someone else's gun: not ours to name
+    ULONGLONG now = GetTickCount64();
+    if (auto it = asked.find(receiver.ptr); it != asked.end() && now - it->second < 1000) return;
+    asked[receiver.ptr] = now;
+    Params ac(cc, "ApplyColor_Server");
+    ac.Set("ColorName", API->MakeName(kMarker)).Call();
+    Log("{}: named a Noveske for every player{}", receiver.Name(), authority ? "" : " (asked the server)");
 }
 
 // Every quarter second: the magazine in each Noveske, the local player's spare magazines while they
@@ -639,12 +716,13 @@ static void WatchDressedGuns() {
     GML_TArray* accepted = nullptr;
     for (size_t i = 0; i < s_dressedGuns.size();) {
         Object gun(s_dressedGuns[i].gun);
-        if (!gun || !API->IsValid(gun.ptr)) { s_dressedGuns.erase(s_dressedGuns.begin() + i); continue; }
+        if (!gun || !API->IsValid(gun.ptr) || !IsDressed(gun)) { s_dressedGuns.erase(s_dressedGuns.begin() + i); continue; }
         if (s_ownMagazines) {
             DressMagazine(gun.GetObj("CurrentMagazine"), gun);
             if (pawn && AttachRoot(gun) == pawn.ptr) playerHasNoveske = true;
             accepted = (GML_TArray*)gun.PropPtr("AcceptedMagazines");
         }
+        Mark(gun);  // repainted at a station since, or the first try didn't reach the server: name it again
         if (Object muzzle = s_dressedGuns[i].muzzle; muzzle && API->IsValid(muzzle.ptr)) {
             bool device = false;
             Params ga(gun, "GetAttachedActors");
@@ -662,7 +740,7 @@ static void WatchDressedGuns() {
         i++;
     }
     for (size_t i = 0; i < s_dressedMags.size();) {  // keep their rounds hidden if the game re-shows them
-        if (!API->IsValid(s_dressedMags[i])) { s_dressedMags.erase(s_dressedMags.begin() + i); continue; }
+        if (!API->IsValid(s_dressedMags[i]) || !IsDressed(Object(s_dressedMags[i]))) { s_dressedMags.erase(s_dressedMags.begin() + i); continue; }
         HideRounds(s_dressedMags[i++]);
     }
     if (playerHasNoveske && accepted && pawn) {
@@ -835,7 +913,10 @@ static bool ResolveLoadout(Object actor) {
         bool noveske = IsNoveskeSlot(slot, saved);
         Log("{} loaded from {} ({}): saved gun '{}' -> {}", actor.Name(), slot, Object(API->GetOuter(gear.ptr)).Name(),
             saved ? Object(saved).Name() : std::string("?"), noveske ? "Noveske" : "not the Noveske");
-        if (noveske) DressAsNoveske(actor);
+        if (noveske) {
+            DressAsNoveske(actor);
+            Mark(actor);
+        }
         return true;
     }
     return false;
@@ -852,47 +933,123 @@ static GUObject* GunOf(GUObject* itemOrGun) {
 static GUObject* s_lastPressedGun = nullptr;  // any spawner menu item pressed, most recent
 static ULONGLONG s_lastPressedAt = 0;
 
-// A receiver of the Noveske's ReceiverClass began play. It is ours if the gun station now holding it
-// as CurrentReceiver was last asked for the Noveske entry. The station sets CurrentReceiver right
-// after the spawn returns, so this is checked on the following frames.
+// A gun station whose player is someone else's. Each player picks guns at their own station, on their
+// own machine; this machine's menu presses and selections say nothing about what that station spawned.
+// (A station with no player yet is this machine's: single player.)
+static bool ForeignStation(Object station) {
+    Object player = station.GetObj("Player");
+    if (!player) return false;
+    Params lc(player, "IsLocallyControlled");
+    lc.Call();
+    return !lc.Return<bool>();
+}
+
+// A receiver of the Noveske's ReceiverClass began play. It is a Noveske if another machine named it one
+// (see "multiplayer"), if the gun station now holding it as CurrentReceiver was last asked for the
+// Noveske entry on this machine, or if it is a loadout gun from a Noveske slot. The station sets
+// CurrentReceiver right after the spawn returns (on a client, when it replicates), so this is checked on
+// the following frames.
 static void ResolvePending() {
     if (s_pending.empty()) return;
     auto stations = FindAllOf("CustomizationStation_Gun_C");
     for (size_t i = 0; i < s_pending.size();) {
         Pending& p = s_pending[i];
         Object actor(p.actor);
-        bool done = !actor;
+        bool done = !actor || !API->IsValid(actor.ptr);
+        if (!done && IsMarked(actor)) {
+            Log("{} is named a Noveske by the game it came from", actor.Name());
+            DressAsNoveske(actor);
+            done = true;
+        }
         for (auto& st : stations) {
             if (done || st.GetObj("CurrentReceiver").ptr != p.actor) continue;
-            Object widget = st.GetObj("WBGunBuilder");
-            GUObject* picked = widget ? widget.GetObj("PressedWeapon").ptr : nullptr;  // the game's own record
-            const char* how = "PressedWeapon";
-            if (!picked) {
-                auto sel = s_selected.find(widget.ptr);
-                if (sel != s_selected.end()) { picked = sel->second; how = "selection event"; }
-            }
+            done = true;
+            if (ForeignStation(st)) break;  // another player's: their machine names it if it is a Noveske
+            GUObject* picked = nullptr;
+            const char* how = "?";
+            if (auto pk = s_picks.find(st.ptr); pk != s_picks.end()) { picked = pk->second; how = "selection"; }
             if (!picked && GetTickCount64() - s_lastPressedAt < 30000) { picked = s_lastPressedGun; how = "last menu press"; }
             Log("{} spawned at {}: picked '{}' (via {}) -> {}", actor.Name(), st.Name(),
                 picked ? Object(picked).Name() : std::string("?"), how, picked == s_gun ? "Noveske" : "stock HK416");
-            if (picked == s_gun) DressAsNoveske(actor);
-            done = true;
+            if (picked == s_gun) {
+                DressAsNoveske(actor);
+                Mark(actor);
+            }
         }
         if (!done) done = ResolveLoadout(actor);
-        // Neither a station spawn nor a loadout gun (world pickup, other player's gun...): stays an HK416.
+        // Neither a station spawn nor a loadout gun (world pickup, other player's gun...): stays an HK416
+        // unless the game it came from names it a Noveske later (OnRep_ColorOption puts it back here).
         if (!done && GetTickCount64() - p.since > 5000) done = true;
         if (done) s_pending.erase(s_pending.begin() + i);
         else i++;
     }
 }
 
+// A level started. Build the mesh and textures while the first one loads, not when the gun is first
+// spawned. A new level's actors can reuse the old ones' addresses, so forget what was dressed. In someone
+// else's game this machine has no game mode, so GML's WORLD_BEGIN_PLAY doesn't fire here: the game
+// state's BeginPlay, which every machine runs, calls this too.
+static void NewLevel() {
+    BuildVisualAssets();
+    // Keep only what is still a live, dressed Noveske (an address reused by a new actor is not).
+    std::erase_if(s_dressedGuns, [](const DressedGun& d) { return !API->IsValid(d.gun) || !IsDressed(Object(d.gun)); });
+    std::erase_if(s_dressedMags, [](GUObject* m) { return !API->IsValid(m) || !IsDressed(Object(m)); });
+    std::erase_if(s_dustCovers, [](const DustCover& c) { return !API->IsValid(c.part) || !API->IsValid(c.mov); });
+    s_picks.clear();
+}
+
+// The level changed if the game state did. GML's WORLD_BEGIN_PLAY comes from the game mode, which only
+// the host (or a single-player game) has; the game state is on every machine.
+static void WatchLevel() {
+    static ULONGLONG next = 0;
+    static std::string level;
+    if (GetTickCount64() < next) return;
+    next = GetTickCount64() + 500;
+    Params gs(Lib("GameplayStatics"), "GetGameState");
+    gs.SetObj("WorldContextObject", Object(API->WorldContext())).Call();
+    Object state = gs.Return<GUObject*>();
+    if (!state) return;
+    std::string now = state.FullName();
+    if (now == level) return;
+    level = now;
+    NewLevel();
+}
+
+static void QueueReceiver(GUObject* actor) {
+    for (auto& pe : s_pending)
+        if (pe.actor == actor) return;
+    s_pending.push_back({actor, GetTickCount64()});
+}
+
 static void InstallVisuals() {
-    // Remember what the spawner widget selected (delegate broadcasts go through ProcessEvent).
-    HookAfter("WB_GunCustomization_C:BndEvt__WB_GunCustomization_WB_Database_K2Node_ComponentBoundEvent_34_OnItemSelected__DelegateSignature",
-              [](Object widget, GUFunction* fn, void* params) {
-                  GUObject* gun = GunOf(Param<GUObject*>(fn, params, "Item"));
-                  s_selected[widget.ptr] = gun;
-                  Log("spawner selection in {}: {}", widget.Name(), Object(gun).Name());
-              });
+    // The spawner's selection (delegate broadcasts go through ProcessEvent). On a client the station asks
+    // the server for the gun with the GunAsset it is handed, and the server can't resolve this machine's
+    // runtime Noveske asset: it would get none, clear the station and spawn nothing. So for that call the
+    // menu item stands for the HK416 donor (same receiver), and this machine remembers that the Noveske was
+    // picked: it dresses the HK416 that comes back and names it a Noveske for everyone.
+    static Object swapped;
+    Hook(kSelectHook,
+         [](Object widget, GUFunction* fn, void* params) {
+             Object item(Param<GUObject*>(fn, params, "Item"));
+             if (!item || !item.IsA("WB_CustomizationItemGun_C")) return false;
+             GUObject* gun = item.GetObj("WeaponItem").ptr;
+             Object station = widget.GetObj("OwningStation");
+             if (station) s_picks[station.ptr] = gun;
+             if (gun != s_gun || !station || HasAuthority(station)) return false;
+             Object donor = FindObject(kDonor);
+             if (!donor) return false;
+             item.Set<GUObject*>("WeaponItem", donor.ptr);
+             swapped = item;
+             Log("{}: asking the server for the HK416 donor; this machine dresses it as the Noveske", station.Name());
+             return false;
+         },
+         [](Object widget, GUFunction* fn, void* params) {
+             if (swapped) {
+                 swapped.Set<GUObject*>("WeaponItem", s_gun);
+                 swapped = {};
+             }
+             Log("spawner selection in {}: {}", widget.Name(), Object(GunOf(Param<GUObject*>(fn, params, "Item"))).Name());
+         });
     // The menu item's own button press - the first script the VR pointer reaches.
     HookAfter("WB_CustomizationItemGun_C:BndEvt__WB_CustomizationItem_Button_46_K2Node_ComponentBoundEvent_1_OnButtonPressedEvent__DelegateSignature",
               [](Object item, GUFunction*, void*) {
@@ -907,23 +1064,27 @@ static void InstallVisuals() {
             Object donor = FindObject(kDonor);
             if (donor) s_receiverClass = donor.Get<GUClass*>("ReceiverClass");
         }
-        if (s_receiverClass && self.Class() == s_receiverClass) s_pending.push_back({self.ptr, GetTickCount64()});
+        if (s_receiverClass && self.Class() == s_receiverClass) QueueReceiver(self.ptr);
     });
+    // A receiver's colour arriving from the server (OnRep), or applied on the server at another player's
+    // request (ApplyColor_Server) or from a saved loadout (ApplyColor): the Noveske's name makes it one here too.
+    for (const char* f : {"ColorComponent:OnRep_ColorOption", "ColorComponent:ApplyColor_Server", "ColorComponent:ApplyColor"})
+        HookAfter(f, [](Object cc, GUFunction*, void*) {
+            Params o(cc, "GetOwner");
+            o.Call();
+            Object actor = o.Return<GUObject*>();
+            if (!actor || !s_receiverClass || actor.Class() != s_receiverClass) return;
+            if (IsDressed(actor) || !IsMarked(actor)) return;
+            QueueReceiver(actor.ptr);
+        });
     On(GML_EVENT_TICK, [](void*) {
+        WatchLevel();
         ResolvePending();
         WatchLoadouts();
         WatchDressedGuns();
         PoseDustCovers();
     });
-    // Build the mesh and textures while the first level loads, not when the gun is first spawned. A new
-    // level's actors can reuse the old ones' addresses, so forget what was dressed.
-    On(GML_EVENT_WORLD_BEGIN_PLAY, [](void*) {
-        BuildVisualAssets();
-        s_dressed.clear();
-        s_dressedGuns.clear();
-        s_dressedMags.clear();
-        s_dustCovers.clear();
-    });
+    On(GML_EVENT_WORLD_BEGIN_PLAY, [](void*) { NewLevel(); });
 }
 
 // ------------------------------------------------------------------ probe (diagnostic)

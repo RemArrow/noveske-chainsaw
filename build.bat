@@ -41,7 +41,10 @@ echo === pack (encrypt Assets\ with a new key)
 cl /nologo /std:c++20 /O2 /MT /EHsc /Fo"%OUT%\obj\\" "%ROOT%tools\pack\pack.cpp" /Fe"%OUT%\pack.exe" || exit /b 1
 "%OUT%\pack.exe" "%ROOT%Assets" "%OUT%\gen\payload.bin" "%OUT%\gen\payload_key.h" || exit /b 1
 echo === plugin (encrypted assets embedded)
-rc /nologo /I "%ROOT%." /fo"%OUT%\obj\NoveskeChainsaw.res" "%ROOT%src\NoveskeChainsaw.rc" || exit /b 1
+rem rc looks for the .rc's build\gen\ files in the current directory first: run it from this plugin's folder
+pushd "%ROOT%" || exit /b 1
+rc /nologo /I "%ROOT%." /fo"%OUT%\obj\NoveskeChainsaw.res" "%ROOT%src\NoveskeChainsaw.rc" || (popd & exit /b 1)
+popd
 cl %CFLAGS% /I"%OUT%\gen" /LD /Fo"%OUT%\obj\\" /Fd"%OUT%\obj\\" "%ROOT%src\*.cpp" "%OUT%\obj\NoveskeChainsaw.res" /Fe"%OUT%\NoveskeChainsaw\NoveskeChainsaw.dll" /link %LFLAGS% || exit /b 1
 echo === align tool
 cl /nologo /std:c++20 /O2 /EHsc /Fo"%OUT%\obj\\" "%ROOT%tools\align\align.cpp" /Fe"%OUT%\align.exe" || exit /b 1

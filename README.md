@@ -158,9 +158,11 @@ GML checkout other than `external/gml`.
 
 ## Known limitations
 
-- Multiplayer (untested): the Noveske look is local. Only your own loadout gun is checked against
-  your save slots, and other players get the HK416 donor from the game, so they see an HK416 with
-  the same attachments and the game's PMAG.
+- Multiplayer: everyone needs the plugin. The receiver's replicated colour name `NoveskeChainsaw` tells
+  every machine an HK416 is a Noveske, so it's dressed for every player, whoever picked it; a machine
+  without the plugin sees an HK416 with the same attachments and the game's PMAG. Verified in a
+  two-player test (`Utils\MPDev`, 2026-10-13): a Noveske picked by the client and one picked by the host
+  dressed on both machines, and the client's shot, fired by the host, a 5.56.
 - Spare magazines turn into the Noveske's PMAG while you carry a Noveske; one picked up while you
   don't stays the game's PMAG until it goes into a Noveske.
 - If you save the Noveske and quit within about a second, before the plugin re-saves the slot,
