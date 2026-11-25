@@ -134,6 +134,8 @@ static float s_offset[3] = {0, 0, 0};  // cm, added to the mesh after the axis c
 static GUObject* s_mesh = nullptr;     // runtime UDynamicMesh (Geometry Scripting): body, handguard, stock, grip, FEER
 static GUObject* s_muzzleMesh = nullptr;  // flash hider (hidden while a muzzle device is mounted)
 static GUObject* s_pmagMesh = nullptr;    // the pack's PMAG, in gun space as if fully inserted
+static constexpr int kPmagRounds = 4;
+static GUObject* s_pmagRoundMesh[kPmagRounds] = {};  // the rounds the pack modelled at its top, top one first
 static GUObject* s_mids[kNumParts] = {};  // one M_DefaultShader instance per texture set
 static bool s_assetsTried = false;
 static GUClass* s_receiverClass = nullptr;
@@ -195,6 +197,10 @@ static bool BuildVisualAssets() {
     s_mesh = load("noveske");
     s_muzzleMesh = load("noveske_muzzle");
     s_pmagMesh = load("noveske_pmag");
+    for (int i = 0; i < kPmagRounds; i++) {  // cut out of the PMAG by tools\split_pmag.js
+        std::string name = "noveske_pmag_round" + std::to_string(i + 1);
+        s_pmagRoundMesh[i] = load(name.c_str(), true);
+    }
     for (auto& p : s_movingParts) p.mesh = load(p.asset, true);  // a part the pack lacks stays the HK416's bone, unseen
     if (s_mesh) Log("Noveske visuals ready: {}", Object(s_mesh).FullName());
     return s_mesh != nullptr;
@@ -425,6 +431,24 @@ static void FitAttachPoints(Object actor) {
 static std::vector<GUObject*> s_dressedMags;
 static Xf s_magInGun;  // magazine actor transform relative to the gun, fully inserted
 
+// The pack's PMAG shows the top of its stack: round k shows while the magazine holds k or more (CurrentAmmo,
+// which replicates, so every player sees the same).
+struct MagRounds { Object comps[kPmagRounds]; int shown = -1; };
+static std::map<GUObject*, MagRounds> s_magRounds;
+
+static void ShowRounds(GUObject* mag) {
+    auto it = s_magRounds.find(mag);
+    if (it == s_magRounds.end()) return;
+    int n = std::clamp(Object(mag).Get<int32_t>("CurrentAmmo"), 0, kPmagRounds);
+    if (n == it->second.shown) return;
+    it->second.shown = n;
+    for (int i = 0; i < kPmagRounds; i++)
+        if (Object c = it->second.comps[i]) {
+            Params v(c, "SetVisibility");
+            v.Set("bNewVisibility", i < n).Set("bPropagateToChildren", false).Call();
+        }
+}
+
 // Read off the actor itself, not a list: only this plugin gives an HK416 receiver or its magazine
 // DynamicMeshComponents (the Noveske's meshes). Lists can go stale: in someone else's game no level-start
 // event says when to forget them, and a new level's actors can reuse old addresses.
@@ -477,6 +501,15 @@ static void DressMagazine(Object mag, Object insertedIn) {
     SetRelativeXf(comp, Invert(s_magInGun));
     HideComponent(root);
     HideRounds(mag);
+    MagRounds rounds;
+    for (int i = 0; i < kPmagRounds; i++) {
+        if (!s_pmagRoundMesh[i]) continue;
+        Object rc = API->AddDynamicMeshComponent(mag.ptr, s_pmagRoundMesh[i], s_mids, kNumParts);
+        if (rc) SetRelativeXf(rc, Invert(s_magInGun));
+        rounds.comps[i] = rc;
+    }
+    s_magRounds[mag.ptr] = rounds;
+    ShowRounds(mag.ptr);
     s_dressedMags.push_back(mag.ptr);
     Log("magazine {} is now the Noveske's PMAG", mag.Name());
 }
@@ -740,8 +773,13 @@ static void WatchDressedGuns() {
         i++;
     }
     for (size_t i = 0; i < s_dressedMags.size();) {  // keep their rounds hidden if the game re-shows them
-        if (!API->IsValid(s_dressedMags[i]) || !IsDressed(Object(s_dressedMags[i]))) { s_dressedMags.erase(s_dressedMags.begin() + i); continue; }
-        HideRounds(s_dressedMags[i++]);
+        if (!API->IsValid(s_dressedMags[i]) || !IsDressed(Object(s_dressedMags[i]))) {
+            s_magRounds.erase(s_dressedMags[i]);
+            s_dressedMags.erase(s_dressedMags.begin() + i);
+            continue;
+        }
+        HideRounds(s_dressedMags[i]);
+        ShowRounds(s_dressedMags[i++]);
     }
     if (playerHasNoveske && accepted && pawn) {
         for (int k = 0; k < accepted->Num; k++) {
@@ -760,8 +798,9 @@ static void WatchDressedGuns() {
 // that wrote it; next launch the game can't find it and hands out its default rifle instead.
 // So once the game has saved the Noveske, the plugin re-saves that slot (with the game's own
 // SaveGameToSlot) with the HK416 donor as GunAsset - same receiver, handling and attachments - and
-// keeps the file's hash in its config. A loadout gun whose slot still holds exactly that file is the
-// Noveske. Without the plugin the slot simply loads as an HK416 with the same attachments.
+// A loadout gun is the Noveske only if its slot was saved with the Noveske's colour name (a stock HK416
+// is saved under our runtime asset too). Without the plugin the slot simply loads as an HK416 with the
+// same attachments.
 
 static std::string FStr8(Object o, const char* prop) {
     char b[256] = "";
@@ -813,32 +852,46 @@ static ConfigEntry<std::string> SlotRecord(const std::string& slot) {
 static std::string RecordedHash(const std::string& slot) { return SlotRecord(slot).Value(); }
 static void RecordHash(const std::string& slot, const std::string& hash) { SlotRecord(slot).Set(hash); }
 
-// Pointer to FGunSetupStruct.GunAsset inside a loaded GunSerializable.
-static GUObject** GunAssetField(Object save) {
+// A field of FGunSetupStruct inside a loaded GunSerializable.
+static void* SetupField(Object save, const char* name) {
     GFProperty* setupProp = save ? API->FindProperty(save.Struct(), "GunSetup") : nullptr;
-    GML_PropInfo setup{}, asset{};
+    GML_PropInfo setup{}, field{};
     if (!setupProp || !API->GetPropertyInfo(setupProp, &setup) || !setup.structType) return nullptr;
-    GFProperty* assetProp = API->FindProperty(setup.structType, "GunAsset");
-    if (!assetProp || !API->GetPropertyInfo(assetProp, &asset)) return nullptr;
-    return (GUObject**)((uint8_t*)save.ptr + setup.offset + asset.offset);
+    GFProperty* fieldProp = API->FindProperty(setup.structType, name);
+    if (!fieldProp || !API->GetPropertyInfo(fieldProp, &field)) return nullptr;
+    return (uint8_t*)save.ptr + setup.offset + field.offset;
 }
+static GUObject** GunAssetField(Object save) { return (GUObject**)SetupField(save, "GunAsset"); }
+
+// The receiver colour a setup was saved with: SaveGunSetup keeps the receiver's ColorOption, which the
+// plugin sets to kMarker on every Noveske (see "multiplayer").
+static bool SavedWithMarker(Object save) {
+    auto* name = (uint64_t*)SetupField(save, "SelectedColor");
+    char b[128] = "";
+    if (name) API->NameToString(*name, b, sizeof b);
+    return _stricmp(b, kMarker) == 0;
+}
+
+struct SavedGun { GUObject* asset; bool marked; };
 
 // The gun a gear manager saved in slot `slotProp`, read with the game's own GetGunSetup.
-static GUObject* SavedGunAsset(Object gear, const char* slotProp) {
+static SavedGun SavedGunSetup(Object gear, const char* slotProp) {
     std::string slot = FStr8(gear, slotProp);
-    if (slot.empty()) return nullptr;
+    if (slot.empty()) return {};
     Params gg(gear, "GetGunSetup");
     gg.SetString("SlotName", Widen8(slot.c_str())).Call();
-    GUObject** f = GunAssetField(gg.Get<GUObject*>("GunSetup"));
-    return f ? *f : nullptr;
+    Object save = gg.Get<GUObject*>("GunSetup");
+    GUObject** f = GunAssetField(save);
+    return {f ? *f : nullptr, SavedWithMarker(save)};
 }
 
-static bool IsNoveskeSlot(const std::string& slot, GUObject* savedAsset) {
-    if (savedAsset && savedAsset == s_gun) return true;  // written this session, not re-saved yet
+// SaveGunSetup names a gun by a GunAsset in AvailableGuns with the receiver's class, and the HK416 and
+// the Noveske share one: a stock HK416 is saved as our runtime asset too. So the GunAsset says nothing;
+// only the Noveske's colour name, which every Noveske carries and SaveGunSetup keeps, marks a Noveske slot.
+static bool IsNoveskeSlot(const std::string&, SavedGun saved) {
+    if (!saved.asset || !saved.marked) return false;
     Object donor = FindObject(kDonor);
-    if (!savedAsset || savedAsset != donor.ptr) return false;
-    std::string h = RecordedHash(slot);
-    return !h.empty() && h == HashHex(ReadFileBytes(SaveGamesDir() + Widen8(slot.c_str()) + L".sav"));
+    return saved.asset == s_gun || saved.asset == donor.ptr;
 }
 
 // Re-save any gun slot the game wrote with the Noveske (or, from an earlier session, with a runtime
@@ -870,7 +923,13 @@ static void WatchLoadouts() {
         if (!asset) continue;
         // A runtime GunAsset path in the file can only be this plugin's Noveske.
         size_t t = raw.find("/Engine/Transient.");
-        bool staleNoveske = !*asset && t != std::string::npos && raw.find(".GunAsset_C_", t) != std::string::npos;
+        // Other plugins (the UAR-15, the Saiga) make runtime GunAssets too: only one in a slot that held the
+        // Noveske before is ours.
+        bool staleNoveske = !*asset && t != std::string::npos && raw.find(".GunAsset_C_", t) != std::string::npos &&
+                            !RecordedHash(slot).empty();
+        bool marked = SavedWithMarker(save);
+        // Our runtime asset in the file: the Noveske if it carries the colour name, else a stock HK416 saved
+        // under the shared receiver. Either way re-save it with the donor so the slot still loads next session.
         if (*asset == s_gun || staleNoveske) {
             Object donor = FindObject(kDonor);
             if (!donor) continue;
@@ -878,14 +937,13 @@ static void WatchLoadouts() {
             Params sv(Lib("GameplayStatics"), "SaveGameToSlot");
             sv.SetObj("SaveGameObject", save).SetString("SlotName", stemW).Set("UserIndex", (int32_t)0).Call();
             if (!sv.Return<bool>()) { Error("could not re-save loadout slot {}", slot); continue; }
-            std::string hash = HashHex(ReadFileBytes(dir + file));
-            RecordHash(slot, hash);
+            RecordHash(slot, marked ? HashHex(ReadFileBytes(dir + file)) : std::string());
             WIN32_FILE_ATTRIBUTE_DATA a;
             if (GetFileAttributesExW((dir + file).c_str(), GetFileExInfoStandard, &a))
                 seen[file] = ((uint64_t)a.ftLastWriteTime.dwHighDateTime << 32) | a.ftLastWriteTime.dwLowDateTime;
-            Log("loadout slot {} holds the Noveske: re-saved with a stable reference{}", slot,
+            Log("loadout slot {} holds {}: re-saved with a stable reference{}", slot, marked ? "the Noveske" : "a stock HK416",
                 staleNoveske ? " (repaired a save from an earlier session)" : "");
-        } else if (!RecordedHash(slot).empty() && !IsNoveskeSlot(slot, *asset)) {
+        } else if (!RecordedHash(slot).empty() && !IsNoveskeSlot(slot, {*asset, marked})) {
             RecordHash(slot, "");  // the game saved a different gun there since
             Log("loadout slot {} no longer holds the Noveske", slot);
         }
@@ -908,11 +966,12 @@ static bool ResolveLoadout(Object actor) {
                                : gear.GetObj("SecondaryGun").ptr == actor.ptr ? "SecondaryGunSetupSlotName"
                                                                                : nullptr;
         if (!slotProp) continue;
-        GUObject* saved = SavedGunAsset(gear, slotProp);
+        SavedGun saved = SavedGunSetup(gear, slotProp);
         std::string slot = FStr8(gear, "GunSetupSlotName") + "_" + FStr8(gear, slotProp);  // SavedGun_MainPrimary
         bool noveske = IsNoveskeSlot(slot, saved);
-        Log("{} loaded from {} ({}): saved gun '{}' -> {}", actor.Name(), slot, Object(API->GetOuter(gear.ptr)).Name(),
-            saved ? Object(saved).Name() : std::string("?"), noveske ? "Noveske" : "not the Noveske");
+        Log("{} loaded from {} ({}): saved gun '{}'{} -> {}", actor.Name(), slot, Object(API->GetOuter(gear.ptr)).Name(),
+            saved.asset ? Object(saved.asset).Name() : std::string("?"), saved.marked ? " named a Noveske" : "",
+            noveske ? "Noveske" : "not the Noveske");
         if (noveske) {
             DressAsNoveske(actor);
             Mark(actor);
@@ -994,6 +1053,7 @@ static void NewLevel() {
     // Keep only what is still a live, dressed Noveske (an address reused by a new actor is not).
     std::erase_if(s_dressedGuns, [](const DressedGun& d) { return !API->IsValid(d.gun) || !IsDressed(Object(d.gun)); });
     std::erase_if(s_dressedMags, [](GUObject* m) { return !API->IsValid(m) || !IsDressed(Object(m)); });
+    std::erase_if(s_magRounds, [](const auto& r) { return std::find(s_dressedMags.begin(), s_dressedMags.end(), r.first) == s_dressedMags.end(); });
     std::erase_if(s_dustCovers, [](const DustCover& c) { return !API->IsValid(c.part) || !API->IsValid(c.mov); });
     s_picks.clear();
 }

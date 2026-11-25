@@ -68,8 +68,10 @@ developer); all trademarks belong to their owners.
    receiver.
 8. **Magazines.** The HK416 takes the game's windowed PMAG. Magazines in a Noveske, and the spares
    you carry while you have one, become the pack's own PMAG: its mesh replaces the magazine's (the
-   game's ammo count, handling and reloads stay; the visible rounds are hidden, as a solid PMAG
-   shows none). The PMAG is hung at the inverse of where a seated magazine sits in the gun,
+   game's ammo count, handling and reloads stay; the game's own rounds, which follow its windowed
+   PMAG's curve, are hidden). The four rounds the pack modelled at the PMAG's lips are cut out of it
+   (`tools/split_pmag.js`) and show only while the magazine holds that many (`CurrentAmmo`, so an
+   empty magazine looks empty to every player). The PMAG is hung at the inverse of where a seated magazine sits in the gun,
    measured from the first one seen seated.
 6. **Loadouts and operations.** The game saves the guns you carry to `SaveGames\SavedGun_<slot>.sav`
    and rebuilds them at team-room start and in every operation. Those rebuilt guns are recognised
@@ -127,6 +129,7 @@ git clone --recursive <this repo>
 set NOVESKE_FBX=<the pack's Mesh\Noveske_Chainsaw.fbx>
 set NOVESKE_TEXTURES=<the pack's Textures folder>
 blender --background --python tools\prepare_runtime.py
+node tools\split_pmag.js
 build.bat install
 ```
 
@@ -155,6 +158,10 @@ GML checkout other than `external/gml`.
 | `tools/pack` (`build\pack.exe`) | `Assets\` → `build\gen\payload.bin` + `payload_key.h`: the encrypted payload and this build's key (see [Asset protection](#asset-protection)); run by `build.bat` |
 | `tools/align` (`build\align.exe`) | `align <HK_416_279_v2.uexp> Assets\noveske.obj [x y z]`: computes the offset from the cooked HK416 mesh (extract it with retoc `to-legacy -f HK_416_279`), then prints the plugin's `kAttachPoints` table for that offset (or for `x y z`) |
 | `tests/NoveskeDev` | in-game test harness, never installed by `build.bat`. It loads the team room and presses the spawner's Noveske item through the game's own button handler. It then logs the receiver's attach points (`ATTACH`), mounts a foregrip, optic and suppressor through `AttachToServer` (`MOUNT`), and poses the gun in front of the headset camera for screenshots. It does the same for a stock HK416 to compare. `[Test] Scenario` in its `.cfg` picks the run: `station` (the above), `loadout` (saves the Noveske with the game's `SaveGunSetup` and rebuilds it with `LoadGunSetups`, as an operation does) `operation` (loads the CargoShip operation and checks the rifle you're given) or `movables` (checks the moving parts ride their bones through a trigger pull and a pulled charging handle, the PMAG, the rail lengths and the flash hider under a suppressor). Screenshots are rendered by the game (`shot`), never taken from the desktop |
+
+## Loadout fix (1.8.2)
+
+The game saves a stock HK416a5 (279mm) under the Noveske's gun entry, because both share one receiver, and 1.8.0 took that (or a remembered file hash) as the Noveske: an HK416 in your loadout spawned as a Noveske with the HK416's attachments. Now only the Noveske's colour name, which every Noveske carries into its save, marks a Noveske slot. Verified in game: a Noveske saved and reloaded as a Noveske, then a stock HK416 saved over it reloaded as an HK416. A slot the old version already turned into a Noveske keeps that until you save an HK416 there once.
 
 ## Known limitations
 

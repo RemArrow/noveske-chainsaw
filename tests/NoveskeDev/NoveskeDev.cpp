@@ -294,6 +294,14 @@ static std::string FStr8(Object o, const char* prop) {
     return b;
 }
 
+static size_t CountComps(Object gun, const char* cls) {
+    if (!gun) return 0;
+    Params gc(gun, "K2_GetComponentsByClass");
+    gc.Set("ComponentClass", FindClass(cls)).Call();
+    auto* arr = (GML_TArray*)gc.Ptr("ReturnValue");
+    return arr ? arr->Num : 0;
+}
+
 static void LogMeshes(Object gun) {
     for (const char* cls : {"StaticMeshComponent", "DynamicMeshComponent", "RealtimeMeshComponent"}) {
         Params gc(gun, "K2_GetComponentsByClass");
@@ -463,7 +471,43 @@ static void Step() {
             DumpNumeric(s_hold.GetObj("ChargingHandle"), "ChargingHandle");
             DumpNumeric(s_hold.GetObj("FireChamber"), "FireChamber");
             Snap("rest");
-            s_step = 71; s_wait = 400;
+            s_step = 80; s_wait = 400;
+            return;
+        // 1.8.1: the PMAG shows as many of its modelled rounds (up to 4) as the magazine holds
+        case 80: case 82: case 84: {
+            Object mag = s_hold.GetObj("CurrentMagazine");
+            if (!mag) { Error("ROUNDS no magazine"); s_step = 71; return; }
+            int want = s_step == 80 ? 30 : s_step == 82 ? 2 : 0;
+            mag.Set("CurrentAmmo", want);
+            Log("ROUNDS set CurrentAmmo = {}", want);
+            s_step++; s_wait = 120;
+            return;
+        }
+        case 81: case 83: case 85: {
+            Object mag = s_hold.GetObj("CurrentMagazine");
+            Params mc(mag, "K2_GetComponentsByClass");
+            mc.Set("ComponentClass", FindClass("DynamicMeshComponent")).Call();
+            auto* ma = (GML_TArray*)mc.Ptr("ReturnValue");
+            int shown = 0, total = 0;
+            for (int i = 0; ma && i < ma->Num; i++) {
+                Object c(((GUObject**)ma->Data)[i]);
+                Params gd(c, "GetDynamicMesh"); gd.Call();
+                Params tc(Object(gd.Return<GUObject*>()), "GetTriangleCount"); tc.Call();
+                Params vis(c, "IsVisible"); vis.Call();
+                Log("ROUNDS   {} triangles {} visible {}", c.Name(), tc.Return<int32_t>(), vis.Return<bool>());
+                if (tc.Return<int32_t>() > 1000) continue;  // the PMAG body
+                total++;
+                shown += vis.Return<bool>();
+            }
+            int ammo = mag.Get<int32_t>("CurrentAmmo"), want = ammo > 4 ? 4 : ammo;
+            Log("ROUNDS ammo {} -> {} of {} rounds shown ({})", ammo, shown, total, total == 4 && shown == want ? "OK" : "WRONG");
+            Snap(s_step == 81 ? "rounds_full" : s_step == 83 ? "rounds_2" : "rounds_empty");
+            s_step = s_step == 85 ? 86 : s_step + 1; s_wait = 300;
+            return;
+        }
+        case 86:
+            s_hold.GetObj("CurrentMagazine").Set("CurrentAmmo", 30);
+            s_step = 71; s_wait = 60;
             return;
         case 71: {  // pull the trigger through the game's own value: the Noveske trigger must follow
             s_hold.Set("CurrentTrigger", 1.0f);
@@ -662,9 +706,45 @@ static void Step() {
         }
         case 43:
             Snap("loadout");
-            s_wait = 900;
+            s_wait = 300;
+            s_step = 44;
+            return;
+        // ---- a stock HK416 saved over the Noveske's slot must load as an HK416
+        case 44:
+            s_hold = Object();
+            Select(s_hk);
+            s_step = 45; s_wait = 120;
+            return;
+        case 45: {
+            Object cur = s_station.GetObj("CurrentReceiver");
+            if (!cur || cur.ptr == s_before) {
+                static int tries = 0;
+                if (tries++ == 0) { Params c(s_widget, kConfirm); c.Call(); s_wait = 90; return; }
+                if (tries < 4) { Params sp(s_station, "SpawnWeapon"); sp.SetObj("GunAsset", s_hk).Call(); s_wait = 90; return; }
+                Error("HK416 spawn did not happen"); s_step = 7; return;
+            }
+            size_t dressed = CountComps(cur, "DynamicMeshComponent") + CountComps(cur, "RealtimeMeshComponent");
+            Log("HK416 spawned {} - Noveske meshes {}", cur.Name(), dressed);
+            Params sv(s_gear, "SaveGunSetup");
+            sv.SetObj("GunReceiver", cur).Call();
+            Log("HK416 saved to the loadout");
+            s_step = 46; s_wait = 180;
+            return;
+        }
+        case 46: {
+            Params ld(s_gear, "LoadGunSetups");
+            ld.Call();
+            s_step = 47; s_wait = 300;
+            return;
+        }
+        case 47: {
+            Object pg = s_gear.GetObj("PrimaryGun");
+            size_t dressed = CountComps(pg, "DynamicMeshComponent") + CountComps(pg, "RealtimeMeshComponent");
+            Log("HK416 LOADOUT PrimaryGun after load: {} - Noveske meshes {} -> {}", pg.Name(), dressed,
+                dressed > 1 ? "FAIL (dressed as the Noveske)" : "PASS (an HK416; a stock HK416 has 1)");
             s_step = 7;
             return;
+        }
         case 60: {  // "operation" scenario: the gun the game hands you in a real operation map
             s_gear = FindFirstOf("BP_GearManagerComponent_C");
             Object pg = s_gear ? s_gear.GetObj("PrimaryGun") : Object();
