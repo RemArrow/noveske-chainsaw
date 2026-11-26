@@ -39,7 +39,14 @@ set LFLAGS=/DEBUG /INCREMENTAL:NO
 
 echo === pack (encrypt Assets\ with a new key)
 cl /nologo /std:c++20 /O2 /MT /EHsc /Fo"%OUT%\obj\\" "%ROOT%tools\pack\pack.cpp" /Fe"%OUT%\pack.exe" || exit /b 1
-"%OUT%\pack.exe" "%ROOT%Assets" "%OUT%\gen\payload.bin" "%OUT%\gen\payload_key.h" || exit /b 1
+rem GML's runtime textures are always sampled as sRGB: pack a staged copy of Assets\ with the Normal and ORM maps
+rem sRGB-encoded (tools\srgb), so the shader reads them back linear. Assets\ itself stays linear.
+if exist "%OUT%\assets" rmdir /s /q "%OUT%\assets"
+robocopy "%ROOT%Assets" "%OUT%\assets" /MIR /NJH /NJS /NFL /NDL /NP >nul
+if errorlevel 8 exit /b 1
+dotnet build "%ROOT%tools\srgb\srgb.csproj" -c Release -o "%OUT%\srgb" --nologo -v q || exit /b 1
+dotnet "%OUT%\srgb\srgb.dll" "%OUT%\assets" || exit /b 1
+"%OUT%\pack.exe" "%OUT%\assets" "%OUT%\gen\payload.bin" "%OUT%\gen\payload_key.h" || exit /b 1
 echo === plugin (encrypted assets embedded)
 rem rc looks for the .rc's build\gen\ files in the current directory first: run it from this plugin's folder
 pushd "%ROOT%" || exit /b 1

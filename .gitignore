@@ -12,3 +12,5 @@ Assets/
 *.fbx
 *.blend
 *.mtl
+tools/srgb/bin/
+tools/srgb/obj/

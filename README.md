@@ -175,3 +175,7 @@ The game saves a stock HK416a5 (279mm) under the Noveske's gun entry, because bo
 - If you save the Noveske and quit within about a second, before the plugin re-saves the slot,
   the next launch repairs it (tested). If the plugin is removed, the slot loads as an HK416.
 - Runtime textures are uncompressed and have no mipmaps, so expect some shimmer at a distance.
+
+## Shading fix (1.8.3)
+
+GML builds the plugin's textures at runtime, and the engine always samples those as sRGB. That's right for colour maps, but the normal and ORM maps are linear data. Read as sRGB, normals tilted (up to about 50 degrees on a flat map) and roughness came out far too low (0.55 read as 0.26), so surfaces looked glossy, washed out and wrongly lit. The build now packs a staged copy of `Assets\` with every `*_Normal.png` and `*_ORM.png` sRGB-encoded (`tools\srgb`), so the shader reads back the intended values. `Assets\` itself stays linear.
